@@ -22,7 +22,7 @@
 
 use derive_error::Error;
 use serde::{de::DeserializeOwned, Serialize};
-use tari_storage::{keyvalue_store::DataStore, lmdb::*};
+use tari_storage::{data_store::DataStore, lmdb::*};
 use tari_utilities::message_format::MessageFormat;
 
 #[derive(Debug, Error)]

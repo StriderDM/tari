@@ -28,7 +28,7 @@ use crate::{
 use derive_error::Error;
 use std::{hash::Hash, sync::RwLock, time::Duration};
 use tari_crypto::keys::PublicKey;
-use tari_storage::keyvalue_store::{DataStore, DatastoreError};
+use tari_storage::data_store::{DataStore, DatastoreError};
 use tari_utilities::message_format::MessageFormatError;
 
 #[derive(Debug, Error)]

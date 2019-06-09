@@ -33,7 +33,7 @@ use crate::{
 use rand::Rng;
 use std::{collections::HashMap, hash::Hash, ops::Index, time::Duration};
 use tari_crypto::keys::PublicKey;
-use tari_storage::keyvalue_store::DataStore;
+use tari_storage::data_store::DataStore;
 use tari_utilities::message_format::MessageFormat;
 
 /// PeerStorage provides a mechanism to keep a datastore and a local copy of all peers in sync and allow fast searches
@@ -415,7 +415,7 @@ mod test {
     use std::fs;
     use tari_crypto::{keys::PublicKey, ristretto::RistrettoPublicKey};
     use tari_storage::{
-        keyvalue_store::DataStore,
+        data_store::DataStore,
         lmdb::{LMDBBuilder, LMDBStore},
     };
 

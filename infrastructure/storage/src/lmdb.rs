@@ -1,6 +1,6 @@
 //! An implementation of [KVStore](trait.KVStore.html) using [LMDB](http://www.lmdb.tech)
 
-use crate::keyvalue_store::{BatchWrite, DataStore, DatastoreError};
+use crate::data_store::{BatchWrite, DataStore, DatastoreError};
 use lmdb_zero as lmdb;
 use lmdb_zero::error::LmdbResultExt;
 use std::{collections::HashMap, sync::Arc};
@@ -207,7 +207,7 @@ impl From<lmdb::error::Error> for DatastoreError {
 mod test {
     use super::{LMDBBuilder, LMDBStore};
     use crate::{
-        keyvalue_store::{BatchWrite, DataStore, DatastoreError},
+        data_store::{BatchWrite, DataStore, DatastoreError},
         lmdb::LMDBBatch,
     };
     use bincode::{deserialize, serialize};

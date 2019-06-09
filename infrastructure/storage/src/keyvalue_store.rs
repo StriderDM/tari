@@ -1,108 +1,91 @@
-//! An abstraction layer for persistent key-value storage. The Tari domain layer classes should only make use of
-//! these traits and objects and let the underlying implementations handle the details.
+//  Copyright 2019 The Tari Project
+//
+//  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+//  following conditions are met:
+//
+//  1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+//  disclaimer.
+//
+//  2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the
+//  following disclaimer in the documentation and/or other materials provided with the distribution.
+//
+//  3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote
+//  products derived from this software without specific prior written permission.
+//
+//  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+//  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+//  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+//  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+//  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+//  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+//  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use bincode::{deserialize, serialize, ErrorKind};
+use std::{borrow::Borrow, collections::HashMap, hash::Hash, sync::Arc};
+
+use lmdb_zero as lmdb;
+
 use derive_error::Error;
-use serde::{de::DeserializeOwned, Serialize};
-use std::error::Error;
 
-#[derive(Debug, Error)]
-pub enum DatastoreError {
-    /// An error occurred with the underlying data store implementation
-    #[error(embedded_msg, no_from, non_std)]
+pub enum KeyValueStoreError {
+       /// An error occurred with the underlying data store implementation
     InternalError(String),
-    /// An error occurred during serialization
-    #[error(no_from, non_std)]
-    SerializationErr(String),
-    /// An error occurred during deserialization
-    #[error(no_from, non_std)]
-    DeserializationErr(String),
-    /// Occurs when trying to perform an action that requires us to be in a live transaction
-    TransactionNotLiveError,
-    /// A transaction or query was attempted while no database was open.
-    DatabaseNotOpen,
-    /// A database with the requested name does not exist
-    UnknownDatabase,
     /// An error occurred during a put query
     #[error(embedded_msg, no_from, non_std)]
-    PutError(String),
+    InsertError(String),
     /// An error occurred during a get query
     #[error(embedded_msg, no_from, non_std)]
     GetError(String),
 }
 
-impl From<bincode::Error> for DatastoreError {
-    fn from(e: Box<ErrorKind>) -> Self {
-        let msg = format!("Datastore conversion error: {}", e.description());
-        DatastoreError::DeserializationErr(msg)
-    }
+pub trait KeyValueStore<K, V> {
+    fn get(&self, key: &K) -> Result<&V, KeyValueStoreError>;
+    fn insert(&mut self, key: K, value: V) -> Result<V, KeyValueStoreError>;
+    fn contains_key<Q: ?Sized>(&self, key: &Q) -> bool;
+    fn remove<Q: ?Sized>(&mut self, key: &Q) -> Result<V, KeyValueStoreError>;
 }
 
-/// General CRUD behaviour of KVStore implementations. Datastore is agnostic of the underlying implementation, but
-/// does assume that key-value pairs are stored using byte arrays (`&[u8]`). You can use `get_raw` or `put_raw` to
-/// read and write binary data directly, or use `#[derive(Serialize, Deserialize, PartialEq, Debug)]` on a trait to
-/// generate code for automatically de/serializing your data structures to byte strings using `bincode`.
-pub trait DataStore {
-    /// Connect to the logical database with `name`. If the Datastore does not support multiple logical databases,
-    /// this function has no effect
-    fn connect(&mut self, name: &str) -> Result<(), DatastoreError>;
+pub struct LmdbStore<'a> {
+    env: Arc<lmdb::Environment>,
+    database: lmdb::Database<'a>,
+}
 
-    /// Get the raw value at the given key, or None if the key does not exist
-    fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DatastoreError>;
-
-    /// Retrieve a value from the store, deserialize it using bincode and return the value or None if the key does not
-    /// exist
-    fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, DatastoreError> {
-        let key = key.as_bytes();
-        let result = self.get_raw(key)?;
-        match result {
-            None => Ok(None),
-            Some(val) => Ok(Some(deserialize(&val[..])?)),
+impl<K, V> KeyValueStore<K, V> for LmdbStore {
+    fn get(&self, key: &K) -> Result<&V, KeyValueStoreError> {
+        let txn = lmdb::ReadTransaction::new(self.env.clone())?;
+        let accessor = txn.access();
+        match accessor.get::<[u8], [u8]>(&self.database, key).to_opt() {
+            Ok(None) => Ok(None),
+            Ok(Some(v)) => Ok(Some(v.to_vec())),
+            Err(e) => Err(KeyValueStoreError::GetError(format!("LMDB get error: {}", e.to_string()))),
         }
     }
 
-    /// Check whether the given key exists in the database
-    fn exists(&self, key: &[u8]) -> Result<bool, DatastoreError>;
-
-    /// Save a value at the given key. Existing values are overwritten
-    fn put_raw(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), DatastoreError>;
-
-    /// This deletes a key from the database
-    fn delete_raw(&mut self, key: &[u8]) -> Result<(), DatastoreError>;
-
-    /// Serialize a value using Bincode and then save it value at the given key. Existing values are overwritten
-    fn put<T: Serialize>(&mut self, key: &str, value: &T) -> Result<(), DatastoreError> {
-        let key = key.as_bytes();
-        let val = serialize(value)?;
-        self.put_raw(key, val)
+    fn insert(&mut self, key: K, value: V) -> Result<V, KeyValueStoreError> {
+        let tx = lmdb::WriteTransaction::new(self.env.clone())?;
+        {
+            let mut accessor = tx.access();
+            accessor.put(&self.database, key, &value, lmdb::put::Flags::empty())?;
+        }
+        tx.commit().map_err(|e| e.into())
     }
 
-    /// Close and release any underlying resources associated with the datastore. The instance is no longer
-    /// accessible from this point
-    fn close(self) -> Result<(), DatastoreError>;
+    fn contains_key<Q: ?Sized>(&self, key: &Q) -> bool {
+        unimplemented!()
+    }
+
+    fn remove<Q: ?Sized>(&mut self, key: &Q) -> Result<V, KeyValueStoreError> {
+        unimplemented!()
+    }
 }
 
-/// BatchWrite is implemented on Datastores if it supports batch writes, or transactions, to efficiently write
-/// multiple puts to the Datastore.
-pub trait BatchWrite {
-    type Store: DataStore;
-    type Batcher: BatchWrite + Sized;
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::collections::HashMap;
 
-    fn new(store: &Self::Store) -> Result<Self::Batcher, DatastoreError>;
-
-    /// Save a value at the given key. Existing values are overwritten
-    fn put_raw(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), DatastoreError>;
-
-    /// Serialize a value and then save it value at the given key. Existing values are overwritten
-    fn put<T: Serialize>(&mut self, key: &str, value: &T) -> Result<(), DatastoreError> {
-        let key = key.as_bytes();
-        let val = serialize(value)?;
-        self.put_raw(key, val)
+    #[test]
+    fn new() {
+        let m = HashMap::new();
+        m.contains_key()
     }
-
-    /// Commit all puts in the batch write to the database
-    fn commit(self) -> Result<(), DatastoreError>;
-
-    /// Discard all puts that have been made in this batch
-    fn abort(self) -> Result<(), DatastoreError>;
 }
