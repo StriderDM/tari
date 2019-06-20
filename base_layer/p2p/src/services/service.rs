@@ -30,6 +30,7 @@ pub trait Service: Send + Sync {
     /// Returns the message types this service requires. These will be
     /// registered in the comms routing.
     fn get_message_types(&self) -> Vec<TariMessageType>;
+    fn initialize(&mut self, context: &ServiceContext) -> Result<(), ServiceError>;
     /// The entry point of the service. This will be executed in a dedicated thread.
     /// The service should use `context.create_connector(message_type)` to create a `DomainConnector`
     /// for the registered message types returned from `Service::get_message_types`.

@@ -48,6 +48,7 @@ pub enum NodeIdentityError {
 /// `secret_key`: The secret key corresponding to the public key of this node
 ///
 /// `control_service_address`: The NetAddress of the local node's Control port
+#[derive(Clone)]
 pub struct NodeIdentity<PK: PublicKey> {
     pub identity: PeerNodeIdentity<PK>,
     pub secret_key: PK::K,
@@ -95,7 +96,7 @@ impl<PK: PublicKey> From<NodeIdentity<PK>> for Peer<PK> {
 
 /// The PeerNodeIdentity is a container that stores the public identity (NodeId, Identification Public Key pair) of a
 /// single node
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Debug, Serialize, Deserialize, Clone)]
 pub struct PeerNodeIdentity<PK> {
     pub node_id: NodeId,
     pub public_key: PK,

@@ -47,7 +47,6 @@ use derive_error::Error;
 use log::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{sync::Arc, thread::JoinHandle};
-use tari_storage::keyvalue_store::DataStore;
 
 const LOG_TARGET: &'static str = "comms::builder";
 

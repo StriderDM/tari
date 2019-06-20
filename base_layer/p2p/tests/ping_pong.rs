@@ -22,48 +22,57 @@
 
 // NOTE: This test uses ports 11111 and 11112
 
+use super::utils::{assert_change, random_string};
 use p2p::{
     ping_pong::PingPongService,
     services::{ServiceExecutor, ServiceRegistry},
-    tari_message::NetMessage,
+    tari_message::{NetMessage, TariMessageType},
 };
 use rand::rngs::OsRng;
+use std::sync::{Arc, RwLock};
 use tari_comms::{
-    builder::{CommsRoutes, CommsServices},
     connection::NetAddress,
     control_service::ControlServiceConfig,
-    peer_manager::NodeIdentity,
-    types::CommsPublicKey,
+    peer_manager::{peer_storage::PeerStorage, NodeIdentity, Peer},
+    types::{CommsDataStore, CommsPublicKey},
     CommsBuilder,
 };
-use p2p::tari_message::TariMessageType;
-use std::sync::Arc;
-use tari_comms::types::CommsDataStore;
-use tari_comms::peer_manager::Peer;
-use tari_storage::lmdb::LMDBBuilder;
-use crate::utils::random_temp_dir;
-use tari_storage::keyvalue_store::DataStore;
+use tari_storage::{keyvalue_store::DataStore, lmdb::LMDBBuilder};
+use tempdir::TempDir;
 
 fn new_node_identity(control_service_address: NetAddress) -> NodeIdentity<CommsPublicKey> {
     NodeIdentity::random(&mut OsRng::new().unwrap(), control_service_address).unwrap()
 }
 
-fn create_peer_storage(name: &str, peers: Vec<Peer<CommsPublicKey>>) -> CommsDataStore {
-    let mut dir = random_temp_dir();
-    let mut store = LMDBBuilder::new().set_path(dir.into()).build().unwrap();
-    store.put_raw()
+fn create_peer_storage(tmpdir: &TempDir, name: &str, peers: Vec<Peer<CommsPublicKey>>) -> CommsDataStore {
+    let mut store = LMDBBuilder::new()
+        .set_path(tmpdir.path().to_str().unwrap())
+        .add_database(name)
+        .build()
+        .unwrap();
 
-    store
+    let mut storage = PeerStorage::new().unwrap();
+    store.connect(name).unwrap();
+    storage.init_persistance_store(store);
+    for peer in peers {
+        storage.add_peer(peer).unwrap();
+    }
+
+    storage.into_datastore().unwrap()
 }
 
-fn setup_services(node_identity: NodeIdentity<CommsPublicKey>, peer_storage: CommsDataStore) -> ServiceExecutor {
-    let services = ServiceRegistry::new().register(PingPongService::new());
-
+fn setup_ping_pong_service(
+    node_identity: NodeIdentity<CommsPublicKey>,
+    peer_storage: CommsDataStore,
+) -> (ServiceExecutor, Arc<RwLock<PingPongService>>)
+{
+    let ping_pong = PingPongService::new();
+    let services = ServiceRegistry::new().register(ping_pong.clone());
     let comms = CommsBuilder::new()
         .with_routes(services.build_comms_routes())
-        .with_node_identity(node_identity)
+        .with_node_identity(node_identity.clone())
         .with_peer_storage(peer_storage)
-        .configure_control_service(ControlServiceConfig{
+        .configure_control_service(ControlServiceConfig {
             socks_proxy_address: None,
             listener_address: node_identity.control_service_address.clone(),
             accept_message_type: TariMessageType::new(NetMessage::Accept),
@@ -73,17 +82,42 @@ fn setup_services(node_identity: NodeIdentity<CommsPublicKey>, peer_storage: Com
         .start()
         .unwrap();
 
-    ServiceExecutor::execute(Arc::new(comms), services)
+    (
+        ServiceExecutor::execute(Arc::new(comms), services),
+        Arc::new(RwLock::new(ping_pong)),
+    )
 }
 
 #[test]
 #[allow(non_snake_case)]
 fn end_to_end() {
+    let node_A_tmpdir = TempDir::new(random_string(8).as_str()).unwrap();
+    let node_B_tmpdir = TempDir::new(random_string(8).as_str()).unwrap();
+
     let node_A_identity = new_node_identity("127.0.0.1:11111".parse().unwrap());
     let node_B_identity = new_node_identity("127.0.0.1:11112".parse().unwrap());
 
-    let node_A_services = setup_services(node_A_identity, create_peer_storage("peer_A", vec![node_B_identity.clone().into()]));
-    let node_B_services = setup_services(node_B_identity, create_peer_storage("peer_B", vec![node_A_identity.clone().into()]));
+    let (node_A_services, node_A_pingpong) = setup_ping_pong_service(
+        node_A_identity.clone(),
+        create_peer_storage(&node_A_tmpdir, "node_A", vec![node_B_identity.clone().into()]),
+    );
 
+    let (node_B_services, node_B_pingpong) = setup_ping_pong_service(
+        node_B_identity.clone(),
+        create_peer_storage(&node_B_tmpdir, "node_B", vec![node_A_identity.clone().into()]),
+    );
 
+    {
+        let lock = node_A_pingpong.read().unwrap();
+        lock.ping(node_B_identity.identity.node_id.clone()).unwrap();
+    }
+
+    assert_change(|| node_B_pingpong.read().unwrap().ping_count(), 1, 20);
+
+    {
+        let lock = node_B_pingpong.read().unwrap();
+        lock.ping(node_A_identity.identity.node_id.clone()).unwrap();
+    }
+
+    assert_change(|| node_A_pingpong.read().unwrap().ping_count(), 1, 20);
 }

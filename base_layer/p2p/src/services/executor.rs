@@ -37,6 +37,7 @@ use tari_comms::{
     DomainConnector,
 };
 use threadpool::ThreadPool;
+use std::sync::Barrier;
 
 const LOG_TARGET: &'static str = "base_layer::p2p::services";
 
@@ -53,6 +54,32 @@ pub struct ServiceExecutor {
     senders: Vec<Sender<ServiceControlMessage>>,
 }
 
+
+
+macro_rules! log_phase {
+    ($name:expr, $result:expr, $success_msg:expr, $error_msg: expr) => {
+                 match $result {
+                    Ok(_) => {
+                        info!(
+                            target: LOG_TARGET,
+                            $success_msg,
+                            $name
+                        );
+                    },
+                    Err(err) => {
+                        error!(
+                            target: LOG_TARGET,
+                            $error_msg,
+                            $name,
+                            err
+                        );
+                    }
+                }
+
+    };
+}
+
+
 impl ServiceExecutor {
     /// Execute the services contained in the given [ServiceRegistry].
     pub fn execute(comms_services: Arc<CommsServices<TariMessageType>>, registry: ServiceRegistry) -> Self {
@@ -63,6 +90,7 @@ impl ServiceExecutor {
             .build();
 
         let mut senders = Vec::new();
+        let barrier = Arc::new(Barrier::new(registry.num_services() + 1));
 
         for mut service in registry.services.into_iter() {
             let (sender, receiver) = channel();
@@ -73,27 +101,28 @@ impl ServiceExecutor {
                 receiver,
             };
 
+            let barrier = barrier.clone();
             thread_pool.execute(move || {
                 info!(target: LOG_TARGET, "Starting service {}", service.get_name());
-                match service.execute(service_context) {
-                    Ok(_) => {
-                        info!(
-                            target: LOG_TARGET,
-                            "Service '{}' has successfully shut down",
-                            service.get_name()
-                        );
-                    },
-                    Err(err) => {
-                        error!(
-                            target: LOG_TARGET,
-                            "Service '{}' has exited with an error: {:?}",
-                            service.get_name(),
-                            err
-                        );
-                    },
-                }
+
+                log_phase!(
+                    service.get_name(),
+                    service.initialize(&service_context),
+                    "Service '{}' initialized",
+                    "Service '{}' failed to initialize: {:?}"
+                );
+
+                barrier.wait();
+                log_phase!(
+                    service.get_name(),
+                    service.execute(service_context),
+                    "Service '{}' has successfully shut down",
+                    "Service '{}' has exited with an error: {:?}"
+                );
             });
         }
+
+        barrier.wait();
 
         Self { thread_pool, senders }
     }

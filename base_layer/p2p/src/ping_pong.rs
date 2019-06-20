@@ -57,15 +57,16 @@ pub enum PingPong {
     Pong,
 }
 
-/// Periodically
+#[derive(Clone)]
 pub struct PingPongService {
     // Needed because the public ping method needs OMS
     oms: Option<Arc<OutboundMessageService>>,
+    ping_count: usize,
 }
 
 impl PingPongService {
     pub fn new() -> Self {
-        Self { oms: None }
+        Self { oms: None, ping_count: 0 }
     }
 
     pub fn ping(&self, node_id: NodeId) -> Result<(), PingPongError> {
@@ -96,7 +97,7 @@ impl PingPongService {
         .map_err(PingPongError::OutboundError)
     }
 
-    fn receive_ping(&self, connector: &DomainConnector<'static>) -> Result<(), PingPongError> {
+    fn receive_ping(&mut self, connector: &DomainConnector<'static>) -> Result<(), PingPongError> {
         if let Some((info, msg)) = connector
             .receive_timeout(Duration::from_millis(500))
             .map_err(PingPongError::ReceiveError)?
@@ -118,11 +119,17 @@ impl PingPongService {
                         target: LOG_TARGET,
                         "Received pong from NodeID {:?}", info.source_identity.node_id
                     );
+
+                    self.ping_count += 1;
                 },
             }
         }
 
         Ok(())
+    }
+
+    pub fn ping_count(&self) -> usize {
+        self.ping_count
     }
 }
 
@@ -135,11 +142,15 @@ impl Service for PingPongService {
         vec![NetMessage::PingPong.into()]
     }
 
+    fn initialize(&mut self, context: &ServiceContext) -> Result<(), ServiceError> {
+        self.oms = Some(context.get_outbound_message_service());
+        Ok(())
+    }
+
     fn execute(&mut self, context: ServiceContext) -> Result<(), ServiceError> {
         let connector = context.create_connector(&NetMessage::PingPong.into()).map_err(|err| {
             ServiceError::ServiceInitializationFailed(format!("Failed to create connector for service: {}", err))
         })?;
-        self.oms = Some(context.get_outbound_message_service());
         loop {
             if let Some(msg) = context.get_control_message(Duration::from_millis(5)) {
                 match msg {

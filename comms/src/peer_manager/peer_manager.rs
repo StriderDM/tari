@@ -73,13 +73,13 @@ where
 {
     /// Constructs a new empty PeerManager
     pub fn new(datastore: Option<DS>) -> Result<PeerManager<PubKey, DS>, PeerManagerError> {
-        Ok(match datastore {
-            Some(datastore) => PeerManager {
-                peer_storage: RwLock::new(PeerStorage::<PubKey, DS>::new()?.init_persistance_store(datastore)?),
-            },
-            None => PeerManager {
-                peer_storage: RwLock::new(PeerStorage::<PubKey, DS>::new()?),
-            },
+        let mut peer_storage = PeerStorage::<PubKey, DS>::new()?;
+        if let Some(store) = datastore {
+            peer_storage.init_persistance_store(store);
+        }
+
+        Ok(Self {
+            peer_storage: RwLock::new(peer_storage),
         })
     }
 
