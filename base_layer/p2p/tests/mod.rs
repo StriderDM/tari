@@ -20,10 +20,5 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-mod builder;
-mod routes;
-
-pub use self::{
-    builder::{CommsBuilder, CommsBuilderError, CommsServices, CommsServicesError},
-    routes::CommsRoutes,
-};
+mod ping_pong;
+mod utils;

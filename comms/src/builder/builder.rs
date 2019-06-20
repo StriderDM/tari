@@ -20,7 +20,6 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use super::types::Factory;
 use crate::{
     builder::CommsRoutes,
     connection::{ConnectionError, DealerProxyError, InprocAddress, ZmqContext},
@@ -48,6 +47,7 @@ use derive_error::Error;
 use log::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{sync::Arc, thread::JoinHandle};
+use tari_storage::keyvalue_store::DataStore;
 
 const LOG_TARGET: &'static str = "comms::builder";
 
@@ -65,11 +65,6 @@ pub enum CommsBuilderError {
     DealerProxyError(DealerProxyError),
     /// Comms routes have not been defined. Call `with_routes` on [CommsBuilder]
     RoutesNotDefined,
-}
-
-trait CommsBuilable {
-    type PublicKey;
-    type DispatcherFactory;
 }
 
 /// ## CommsBuilder
@@ -110,11 +105,8 @@ pub struct CommsBuilder<MType>
 where MType: Clone
 {
     zmq_context: ZmqContext,
-    // Factories
-    peer_storage_factory: Option<Box<Factory<CommsDataStore>>>,
-
-    // Configs
     routes: Option<CommsRoutes<MType>>,
+    peer_storage: Option<CommsDataStore>,
     control_service_config: Option<ControlServiceConfig<MType>>,
     omp_config: Option<OutboundMessagePoolConfig>,
     node_identity: Option<NodeIdentity<CommsPublicKey>>,
@@ -135,7 +127,7 @@ where
             control_service_config: None,
             peer_conn_config: None,
             omp_config: None,
-            peer_storage_factory: None,
+            peer_storage: None,
             routes: None,
             node_identity: None,
         }
@@ -146,12 +138,8 @@ where
         self
     }
 
-    pub fn with_peer_storage<F>(mut self, factory: F) -> Self
-    where
-        F: Factory<CommsDataStore>,
-        F: 'static,
-    {
-        self.peer_storage_factory = Some(Box::new(factory));
+    pub fn with_peer_storage(mut self, peer_storage: CommsDataStore) -> Self {
+        self.peer_storage = Some(peer_storage);
         self
     }
 
@@ -176,7 +164,7 @@ where
     }
 
     fn make_peer_manager(&mut self) -> Result<Arc<PeerManager<CommsPublicKey, CommsDataStore>>, CommsBuilderError> {
-        let storage = self.peer_storage_factory.take().map(|f| f.make());
+        let storage = self.peer_storage.take();
         let peer_manager = PeerManager::new(storage).map_err(CommsBuilderError::PeerManagerError)?;
         Ok(Arc::new(peer_manager))
     }

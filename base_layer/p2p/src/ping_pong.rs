@@ -96,7 +96,7 @@ impl PingPongService {
         .map_err(PingPongError::OutboundError)
     }
 
-    fn run(&self, connector: &DomainConnector<'static>) -> Result<(), PingPongError> {
+    fn receive_ping(&self, connector: &DomainConnector<'static>) -> Result<(), PingPongError> {
         if let Some((info, msg)) = connector
             .receive_timeout(Duration::from_millis(500))
             .map_err(PingPongError::ReceiveError)?
@@ -147,7 +147,7 @@ impl Service for PingPongService {
                 }
             }
 
-            match self.run(&connector) {
+            match self.receive_ping(&connector) {
                 Ok(_) => {},
                 Err(err) => {
                     error!(target: LOG_TARGET, "PingPong service had error: {}", err);

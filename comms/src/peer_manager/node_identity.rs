@@ -25,6 +25,7 @@ use crate::{
     peer_manager::{
         node_id::{NodeId, NodeIdError},
         Peer,
+        PeerFlags,
     },
 };
 use derive_error::Error;
@@ -78,6 +79,17 @@ impl NodeIdentity<RistrettoPublicKey> {
             control_service_address.or("127.0.0.1:9000".parse().ok()).unwrap(),
         )
         .unwrap()
+    }
+}
+
+impl<PK: PublicKey> From<NodeIdentity<PK>> for Peer<PK> {
+    fn from(node_identity: NodeIdentity<PK>) -> Peer<PK> {
+        Peer::new(
+            node_identity.identity.public_key,
+            node_identity.identity.node_id,
+            node_identity.control_service_address.into(),
+            PeerFlags::empty(),
+        )
     }
 }
 

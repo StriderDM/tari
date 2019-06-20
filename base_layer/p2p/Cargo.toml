@@ -17,3 +17,4 @@ log = "0.4.6"
 rand = "0.6.5"
 
 [dev-dependencies]
+tari_storage = { version = "0.0.1", path = "../../infrastructure/storage"}

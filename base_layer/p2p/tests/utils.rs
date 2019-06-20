@@ -19,15 +19,16 @@
 //  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+use rand::{distributions::Distribution, rngs::OsRng, Rng};
+use std::{env::temp_dir, iter, path::PathBuf};
 
-pub trait Factory<T> {
-    fn make(&self) -> T;
-}
-
-impl<F, T> Factory<T> for F
-where F: Fn() -> T
-{
-    fn make(&self) -> T {
-        (self)()
-    }
+pub fn random_temp_dir() -> PathBuf {
+    let mut path = temp_dir();
+    let mut rng = OsRng::new().unwrap();
+    let rand_str: String = iter::repeat(())
+        .map(|_| rng.sample(Distribution::Alphanumeric))
+        .take(8)
+        .collect();
+    path.push(rand_str);
+    path
 }
