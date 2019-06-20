@@ -48,12 +48,14 @@ macro_rules! acquire_lock {
     };
 }
 
+/// Acquire write lock from a RwLock
 macro_rules! acquire_write_lock {
     ($e:expr) => {
         acquire_lock!($e, write)
     };
 }
 
+/// Acquire read lock from a RwLock
 macro_rules! acquire_read_lock {
     ($e:expr) => {
         acquire_lock!($e, read)
