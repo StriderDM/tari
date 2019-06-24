@@ -32,6 +32,7 @@ use tari_comms::{
     types::{CommsPublicKey, CommsSecretKey},
     CommsBuilder,
 };
+use tari_comms::types::CommsDataStore;
 
 #[derive(Debug, Error)]
 pub enum CommsInitializationError {
@@ -52,6 +53,7 @@ pub struct CommsConfig {
 pub fn initialize_comms(
     config: CommsConfig,
     comms_routes: CommsRoutes<TariMessageType>,
+    datastore: CommsDataStore,
 ) -> Result<Arc<CommsServices<TariMessageType>>, CommsInitializationError>
 {
     let node_identity = NodeIdentity::new(
@@ -64,6 +66,7 @@ pub fn initialize_comms(
     let comms = CommsBuilder::new()
         .with_routes(comms_routes.clone())
         .with_node_identity(node_identity)
+        .with_peer_storage(datastore)
         .configure_control_service(config.control_service)
         .configure_peer_connections(PeerConnectionConfig {
             socks_proxy_address: config.socks_proxy_address,

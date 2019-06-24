@@ -92,7 +92,7 @@ fn create_peer_storage(tmpdir: &TempDir, name: &str, peers: Vec<Peer<CommsPublic
 }
 
 fn setup_ping_pong_service(
-    node_identity: NodeIdentity<CommsPublicKey>,
+    node_identity: NodeIdentity,
     peer_storage: CommsDataStore,
 ) -> (ServiceExecutor, Arc<PingPongServiceApi>)
 {
@@ -149,18 +149,12 @@ fn end_to_end() {
         .unwrap();
 
     assert_change(
-        || match node_B_pingpong.ping_count().unwrap() {
-            PingPongApiResponse::Count(n) => n,
-            _ => panic!("Unexpected response"),
-        },
+        || match node_B_pingpong.ping_count().unwrap(),
         1,
         20,
     );
     assert_change(
-        || match node_A_pingpong.pong_count().unwrap() {
-            PingPongApiResponse::Count(n) => n,
-            _ => panic!("Unexpected response"),
-        },
+        || match node_A_pingpong.pong_count().unwrap(),
         1,
         20,
     );
@@ -171,18 +165,12 @@ fn end_to_end() {
         .unwrap();
 
     assert_change(
-        || match node_A_pingpong.ping_count().unwrap() {
-            PingPongApiResponse::Count(n) => n,
-            _ => panic!("Unexpected response"),
-        },
+        || match node_A_pingpong.ping_count().unwrap(),
         1,
         20,
     );
     assert_change(
-        || match node_A_pingpong.ping_count().unwrap() {
-            PingPongApiResponse::Count(n) => n,
-            _ => panic!("Unexpected response"),
-        },
+        || match node_A_pingpong.ping_count().unwrap(),
         1,
         20,
     );

@@ -31,7 +31,12 @@ use crate::{
     types::CommsRng,
 };
 use rand::Rng;
-use std::{collections::HashMap, hash::Hash, ops::Index, time::Duration};
+use std::{
+    collections::{hash_map::Values, HashMap},
+    hash::Hash,
+    ops::Index,
+    time::Duration,
+};
 use tari_crypto::keys::PublicKey;
 use tari_storage::keyvalue_store::DataStore;
 use tari_utilities::message_format::MessageFormat;
@@ -444,6 +449,35 @@ where
     /// Returns the DataStore underlying PeerStorage if one exists
     pub fn into_datastore(self) -> Option<DS> {
         self.datastore
+    }
+
+    pub fn iter(&self) -> PeerIterator<'_, PubKey, DS> {
+        PeerIterator::new(self)
+    }
+}
+
+pub struct PeerIterator<'a, PK, DS> {
+    indexes_iter: Values<'a, PK, usize>,
+    storage: &'a PeerStorage<PK, DS>,
+}
+
+impl<'a, PK, DS> PeerIterator<'a, PK, DS> {
+    pub fn new(storage: &'a PeerStorage<PK, DS>) -> Self {
+        let iter = storage.public_key_hm.values();
+        Self {
+            storage,
+            indexes_iter: iter,
+        }
+    }
+}
+
+impl<'a, PK, DS> Iterator for PeerIterator<'a, PK, DS>
+where Peer<PK>: Clone
+{
+    type Item = Peer<PK>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indexes_iter.next().map(|idx| self.storage.peers[*idx].clone())
     }
 }
 

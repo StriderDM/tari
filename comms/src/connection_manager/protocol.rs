@@ -35,13 +35,13 @@ use tari_utilities::message_format::MessageFormat;
 const LOG_TARGET: &'static str = "comms::connection_manager::protocol";
 
 pub(crate) struct PeerConnectionProtocol<'e, 'ni> {
-    node_identity: &'ni Arc<NodeIdentity<CommsPublicKey>>,
+    node_identity: &'ni Arc<NodeIdentity>,
     establisher: &'e ConnectionEstablisher<CommsPublicKey>,
 }
 
 impl<'e, 'ni> PeerConnectionProtocol<'e, 'ni> {
     pub fn new(
-        node_identity: &'ni Arc<NodeIdentity<CommsPublicKey>>,
+        node_identity: &'ni Arc<NodeIdentity>,
         establisher: &'e ConnectionEstablisher<CommsPublicKey>,
     ) -> Self
     {

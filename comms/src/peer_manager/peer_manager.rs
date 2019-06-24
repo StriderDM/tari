@@ -247,6 +247,18 @@ where
             .map_err(|_| PeerManagerError::PoisonedAccess)?
             .reset_connection_attempts(node_id)
     }
+
+    /// Returns a copy of all the stored peers. This shouldn't be used in normal applications
+    /// but is useful for example applications.
+    pub fn get_peers(&self) -> Result<Vec<Peer<PubKey>>, PeerManagerError> {
+        // TODO(sdbondi): Implement PeerIterator as part of the refactor to the new LMDB storage
+        Ok(self
+            .peer_storage
+            .read()
+            .map_err(|_| PeerManagerError::PoisonedAccess)?
+            .peers
+            .clone())
+    }
 }
 
 #[cfg(test)]

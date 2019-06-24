@@ -63,7 +63,7 @@ impl MessageEnvelope {
 
     /// Sign a message, construct a MessageEnvelopeHeader and return the resulting MessageEnvelope
     pub fn construct(
-        node_identity: &Arc<NodeIdentity<CommsPublicKey>>,
+        node_identity: &Arc<NodeIdentity>,
         dest_public_key: CommsPublicKey,
         dest: NodeDestination<CommsPublicKey>,
         body: Frame,
