@@ -1,0 +1,17 @@
+########################################################################################################################
+#                                                                                                                      #
+#                                          Wallet Configuration Options                                                #
+#                                                                                                                      #
+########################################################################################################################
+
+# TODO Finalize this config file
+
+# Base64 encoded Ristretto Secret Key
+local_node_comms_secret_key = "IAAAAAAAAAA3jIh+jLlar7bQGOSfQ/QvCXMh6JAWljXoQ5DJ5TcxDA=="
+local_comms_port = 10000
+local_grpc_port = 10001
+
+
+
+
+
