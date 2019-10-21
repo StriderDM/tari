@@ -67,8 +67,8 @@ pub struct NetworkStatusFfi {}
 #[no_mangle]
 pub unsafe extern "C" fn create_wallet(
     // Local Node Identity data
-    public_key: *const c_char,         // PublicKey
-    secret_key: *const c_char,         // SecretKey
+    public_key: *const c_char,         // Byte[32] - PublicKey
+    secret_key: *const c_char,         // Byte[32] - SecretKey
     net_address: *const c_char,        // NetAddress
     datastore_path: *const c_char,     // String
     peer_database_name: *const c_char, // String
@@ -89,7 +89,7 @@ pub unsafe extern "C" fn start_wallet(wallet: *mut WalletFfi) -> bool {}
 #[no_mangle]
 pub unsafe extern "C" fn set_key_manager(
     wallet: *mut WalletFfi,
-    master_key: *const c_char,  // PrivateKey
+    master_key: *const c_char,  // Byte[32] - PrivateKey
     branch_seed: *const c_char, // String,
     index: c_uint,
 ) -> bool
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn add_output(
     wallet: *mut WalletFfi,
     spent: char,                 // Bool,
     value: c_ulonglong,          // u64
-    spending_key: *const c_char, // PrivateKey,
+    spending_key: *const c_char, // Byte[32] - PrivateKey,
     feature_flags: c_char,       // OutputFlags,
     maturity: c_ulonglong,       // u64
 ) -> bool
@@ -120,7 +120,7 @@ pub unsafe extern "C" fn create_pending_transaction_outputs(
         tx_id,
         outputs_to_be_spent: Vec::new(),
         outputs_to_be_received: Vec::new(),
-        timestamp: NaiveDateTime::parse_from_str("timestamp", "THE FORMAT WE CHOOSE").unwrap_or(NaiveDateTime::now), /* TODO Select a datetime format */
+        timestamp: NaiveDateTime::parse_from_str("timestamp", "THE FORMAT WE CHOOSE").unwrap_or(NaiveDateTime::now), /* Use the rfc-3339 Format for this. */
     }))
 }
 
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn add_pending_transaction_outputs(
 #[no_mangle]
 pub unsafe extern "C" fn create_transaction(
     tx_id: c_ulonglong,    // u64
-    offset: *const c_char, // PrivateKey
+    offset: *const c_char, // Byte[32] - PrivateKey
 ) -> *mut Transaction
 {
 }
@@ -173,7 +173,7 @@ pub unsafe extern "C" fn create_transaction(
 #[no_mangle]
 pub unsafe extern "C" fn add_transaction_input(
     transaction: *mut Transaction,
-    commitment: *const c_char, // Commitment
+    commitment: *const c_char, // Byte[32] - Commitment
     feature_flags: c_char,     // OutputFlags,
     maturity: c_ulonglong,     // u64
 ) -> bool
@@ -185,8 +185,8 @@ pub unsafe extern "C" fn add_transaction_input(
 #[no_mangle]
 pub unsafe extern "C" fn add_transaction_output(
     transaction: *mut Transaction,
-    commitment: *const c_char, // Commitment
-    proof: *const c_char,      // Rangeproof
+    commitment: *const c_char, // Byte[32] - Commitment
+    proof: *const c_char,      // Byte[32] - Rangeproof
     feature_flags: c_char,     // OutputFlags,
     maturity: c_ulonglong,     // u64
 ) -> bool
@@ -201,10 +201,10 @@ pub unsafe extern "C" fn add_transaction_kernel(
     features: c_char, // KernelFeatures,
     fee: c_ulonglong, // MicroTari,
     lock_height: u64,
-    meta_info: *const c_char,     // Option<HashOutput>,
-    linked_kernel: *const c_char, // Option<HashOutput>,
-    excess: *const c_char,        // Commitment,
-    excess_sig: *const c_char,    // Signature,
+    meta_info: *const c_char,     // Option<Byte[32]> - Option<HashOutput>,
+    linked_kernel: *const c_char, // Option<Byte[32]> - Option<HashOutput>,
+    excess: *const c_char,        // Byte[32] - Commitment,
+    excess_sig: *const c_char,    // Byte[32] - Signature,
 ) -> bool
 {
     // append kernel to tx
@@ -214,14 +214,18 @@ pub unsafe extern "C" fn add_transaction_kernel(
 #[no_mangle]
 pub unsafe extern "C" fn add_transaction(wallet: *mut WalletFfi, pending_tx: *mut Transaction) -> bool {}
 
-/// add a ReceivedTransactionProtocol instance to the wallet
+/// Add a ReceivedTransactionProtocol instance to the wallet
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_inbound_transaction(
     wallet: *mut WalletFfi,
     tx_id: c_ulonglong,               // u64,
-    output: *const c_char,            // TransactionOutput,
-    public_spend_key: *const c_char,  // PublicKey,
-    partial_signature: *const c_char, // Signature,
+    public_spend_key: *const c_char,  // Byte[32] - PublicKey,
+    partial_signature: *const c_char, // Byte[32] - Signature,
+    // TransactionOutput
+    commitment: *const c_char, // Byte[32] - Commitment
+    proof: *const c_char,      // Byte[32] - Rangeproof
+    feature_flags: c_char,     // OutputFlags,
+    maturity: c_ulonglong,     // u64
 ) -> bool
 {
     // append this data to the wallet.
@@ -235,22 +239,22 @@ pub unsafe extern "C" fn create_pending_outbound_transaction(
     num_recipients: c_uint,                // usize,
     amount_to_self: c_ulonglong,           // MicroTari,
     change: c_ulonglong,                   // MicroTari,
-    offset: *const c_char,                 // BlindingFactor,
-    offset_blinding_factor: *const c_char, // BlindingFactor,
-    public_excess: *const c_char,          // PublicKey,
-    private_nonce: *const c_char,          // PrivateKey,
-    public_nonce: *const c_char,           // PublicKey,
-    public_nonce_sum: *const c_char,       // PublicKey,
+    offset: *const c_char,                 // Byte[32] - BlindingFactor,
+    offset_blinding_factor: *const c_char, // Byte[32] - BlindingFactor,
+    public_excess: *const c_char,          // Byte[32] - PublicKey,
+    private_nonce: *const c_char,          // Byte[32] - PrivateKey,
+    public_nonce: *const c_char,           // Byte[32] - PublicKey,
+    public_nonce_sum: *const c_char,       // Byte[32] - PublicKey,
     // Metadata members
     fee: c_ulonglong,             // MicroTari,
     lock_height: c_ulonglong,     // u64,
-    meta_info: *const c_char,     // Option<HashOutput>,
-    linked_kernel: *const c_char, // Option<HashOutput>,
+    meta_info: *const c_char,     // Option<Byte[32]> - Option<HashOutput>,
+    linked_kernel: *const c_char, // Option<Byte[32]> - Option<HashOutput>,
     // RecipientInfo members
     tx_id: c_ulonglong,               // u64,
-    output: *const c_char,            // TransactionOutput,
-    public_spend_key: *const c_char,  // PublicKey,
-    partial_signature: *const c_char, // Signature,
+    output: *const c_char,            // Byte[32] - TransactionOutput,
+    public_spend_key: *const c_char,  // Byte[32] - PublicKey,
+    partial_signature: *const c_char, // Byte[32] - Signature,
 ) -> () //*mut RawTransactionInfo, //TODO Figure out the best way to expose this struct for this interface
 {
     // create the initial RawTransactionInfo struct that will be used to construct the pending outbound transaction
@@ -280,7 +284,7 @@ pub unsafe extern "C" fn add_pending_outbound_amount(
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_outbound_input(
     // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    commitment: *const c_char, // Commitment
+    commitment: *const c_char, // Byte[32] - Commitment
     feature_flags: c_char,     // OutputFlags,
     maturity: c_ulonglong,     // u64
 ) -> bool
@@ -292,8 +296,8 @@ pub unsafe extern "C" fn add_pending_outbound_input(
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_outbound_output(
     // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    commitment: *const c_char, // Commitment
-    proof: *const c_char,      // Rangeproof
+    commitment: *const c_char, // Byte[32] - Commitment
+    proof: *const c_char,      // Byte[32] - Rangeproof
     feature_flags: c_char,     // OutputFlags,
     maturity: c_ulonglong,     // u64
 ) -> bool
@@ -305,7 +309,7 @@ pub unsafe extern "C" fn add_pending_outbound_output(
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_outbound_signature(
     // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    signature: *const c_char, // Signature
+    signature: *const c_char, // Byte[32] - Signature
 ) -> bool
 {
     // append signature
@@ -360,8 +364,8 @@ pub unsafe extern "C" fn generate_identity(wallet: *mut WalletFfi) -> *mut Ident
 #[no_mangle]
 pub unsafe extern "C" fn add_base_node_peer(
     wallet: *mut WalletFfi,
-    public_key: *const c_char,  // PublicKey
-    secret_key: *const c_char,  // SecretKey
+    public_key: *const c_char,  // Byte[32] - PublicKey
+    secret_key: *const c_char,  // Byte[32] - SecretKey
     net_address: *const c_char, // NetAddress
 ) -> bool
 {
@@ -379,10 +383,11 @@ pub unsafe extern "C" fn get_balance(wallet: *mut WalletFfi) -> c_ulonglong {}
 #[no_mangle]
 pub unsafe extern "C" fn send_transaction(
     wallet: *mut WalletFfi,
-    amount: c_ulonglong,
-    fee_per_gram: c_ulonglong,
+    amount: c_ulonglong,       // MicroTari
+    fee_per_gram: c_ulonglong, // MicroTari
+    lock_height: c_ulonglong,  // u64
     // Destination Node Peer
-    public_key: *const c_char,  // PublicKey
+    public_key: *const c_char,  // Byte[32] - PublicKey
     net_address: *const c_char, // NetAddress
 ) -> bool
 {
