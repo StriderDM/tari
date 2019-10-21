@@ -63,13 +63,13 @@ pub type WalletDateTime = NaiveDateTime;
 ///
 ///     if (!instance)
 ///     {
-///       instance = new TokioRuntime();
+///        TokioRuntime();
 ///     }
 ///     return instance;
 /// }
 /// private:
-///   MySingleton() { runtime_create(); }
-///   ~MySingleton() { runtime_destroy(instance); }
+///   TokioRuntime() { instance = runtime_create(); }
+///   ~TokioRuntime() { runtime_destroy(instance); }
 /// }
 pub type TokioRuntime = Runtime;
 
@@ -131,6 +131,17 @@ pub unsafe extern "C" fn public_key_get_key(pk: *mut WalletPublicKey) -> *mut c_
 /// -------------------------------------------------------------------------------------------- ///
 
 /// -------------------------------- Private Key ------------------------------------------------ ///
+/// Example c++ Usage
+/// class PrivateKey
+/// {
+///  public:
+///    PrivateKey(s:char*) { pointer = public_key_create(s); }
+///    const char* Get_Hex_Str() { return public_key_get_key(pointer); }
+///    ~PrivateKey() { public_key_destroy(pointer); }
+/// private:
+///   PrivateKey* pointer;
+/// }
+
 #[no_mangle]
 pub unsafe extern "C" fn private_key_create(hex: *const c_char) -> *mut WalletPrivateKey
 {
