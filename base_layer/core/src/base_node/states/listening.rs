@@ -20,10 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{
-    base_node::states::{block_sync::BlockSync, InitialSync, StateEvent, StateEvent::FatalError},
-    chain_storage::BlockchainBackend,
-};
+use crate::base_node::states::{block_sync::BlockSync, InitialSync, StateEvent, StateEvent::FatalError};
 use log::*;
 
 const LOG_TARGET: &str = "base_node::listening";
@@ -31,7 +28,7 @@ const LOG_TARGET: &str = "base_node::listening";
 pub struct Listening;
 
 impl Listening {
-    pub fn next_event(&mut self) -> StateEvent {
+    pub async fn next_event(&mut self) -> StateEvent {
         info!(target: LOG_TARGET, "Listening for new blocks");
         FatalError("Unimplemented".into())
     }
@@ -47,8 +44,8 @@ impl From<BlockSync> for Listening {
 
 /// State management for BlockSync -> Listening. This state change happens when a node restarts and still happens to
 /// be in sync with the network.
-impl<B: BlockchainBackend> From<InitialSync<B>> for Listening {
-    fn from(_old: InitialSync<B>) -> Self {
+impl From<InitialSync> for Listening {
+    fn from(_old: InitialSync) -> Self {
         unimplemented!()
     }
 }

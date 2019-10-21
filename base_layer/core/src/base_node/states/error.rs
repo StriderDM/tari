@@ -1,4 +1,4 @@
-// Copyright 2019 The Tari Project
+// Copyright 2019. The Tari Project
 //
 // Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
 // following conditions are met:
@@ -20,56 +20,17 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{
-    connection::PeerConnection,
-    connection_manager::{ConnectionManagerError, Dialer},
-};
-use futures::{future, Future};
-use std::{
-    marker::PhantomData,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use crate::base_node::states::StateEvent;
+use derive_error::Error;
 
-/// Count the number of dial attempts. Resolving into a test peer connection.
-pub struct CountDialer<T> {
-    count: Arc<AtomicUsize>,
-    _t: PhantomData<T>,
+#[derive(Clone, Debug, Error)]
+pub enum BaseNodeError {
+    #[error(msg_embedded, non_std, no_from)]
+    ConfigurationError(String),
 }
 
-impl<T> Clone for CountDialer<T> {
-    fn clone(&self) -> Self {
-        Self {
-            count: Arc::clone(&self.count),
-            _t: PhantomData,
-        }
-    }
-}
-
-impl<T> CountDialer<T> {
-    pub fn new() -> Self {
-        Self {
-            count: Arc::new(AtomicUsize::new(0)),
-            _t: PhantomData,
-        }
-    }
-
-    pub fn count(&self) -> usize {
-        self.count.load(Ordering::SeqCst)
-    }
-}
-
-impl<T> Dialer<T> for CountDialer<T> {
-    type Error = ConnectionManagerError;
-    type Output = Arc<PeerConnection>;
-
-    type Future = impl Future<Output = Result<Self::Output, Self::Error>> + Send + Unpin;
-
-    fn dial(&self, _: &T) -> Self::Future {
-        let (conn, _) = PeerConnection::new_with_connecting_state_for_test();
-        self.count.fetch_add(1, Ordering::AcqRel);
-        future::ready(Ok(Arc::new(conn)))
+impl BaseNodeError {
+    pub fn as_fatal(&self, preface: &str) -> StateEvent {
+        StateEvent::FatalError(format!("{} {}", preface, self.to_string()))
     }
 }

@@ -63,9 +63,8 @@ impl Block {
     /// valid. It does _not_ check that the inputs exist in the current UTXO set;
     /// nor does it check that the PoW is the largest accumulated PoW value.
     pub fn check_internal_consistency(&self, rules: &ConsensusRules) -> Result<(), BlockValidationError> {
-        let block_reward = rules.emission_schedule().block_reward(self.header.height);
         let offset = &self.header.total_kernel_offset;
-        let total_coinbase = self.calculate_coinbase_and_fees(block_reward);
+        let total_coinbase = self.calculate_coinbase_and_fees(rules);
         self.body
             .validate_internal_consistency(&offset, total_coinbase, &PROVER, &COMMITMENT_FACTORY)?;
         self.check_stxo_rules()?;
@@ -74,9 +73,9 @@ impl Block {
     }
 
     // create a total_coinbase offset containing all fees for the validation
-    fn calculate_coinbase_and_fees(&self, block_reward: MicroTari) -> MicroTari {
-        let mut coinbase = block_reward;
-        for kernel in &self.body.kernels {
+    pub fn calculate_coinbase_and_fees(&self, rules: &ConsensusRules) -> MicroTari {
+        let mut coinbase = rules.emission_schedule().block_reward(self.header.height);
+        for kernel in self.body.kernels() {
             coinbase += kernel.fee;
         }
         coinbase
@@ -88,7 +87,7 @@ impl Block {
 
     /// This function will check spent kernel rules like tx lock height etc
     pub fn check_kernel_rules(&self) -> Result<(), BlockValidationError> {
-        for kernel in &self.body.kernels {
+        for kernel in self.body.kernels() {
             if kernel.lock_height > self.header.height {
                 return Err(BlockValidationError::InvalidKernel);
             }
@@ -99,7 +98,7 @@ impl Block {
     /// This function will check all new utxo to ensure that feature flags where set
     pub fn check_utxo_rules(&self, current_rules: &ConsensusRules) -> Result<(), BlockValidationError> {
         let mut coinbase_counter = 0; // there should be exactly 1 coinbase
-        for utxo in &self.body.outputs {
+        for utxo in self.body.outputs() {
             if utxo.features.flags.contains(OutputFlags::COINBASE_OUTPUT) {
                 coinbase_counter += 1;
                 if utxo.features.maturity < (self.header.height + current_rules.coinbase_lock_height()) {
@@ -115,7 +114,7 @@ impl Block {
 
     /// This function will check all stxo to ensure that feature flags where followed
     pub fn check_stxo_rules(&self) -> Result<(), BlockValidationError> {
-        for input in &self.body.inputs {
+        for input in self.body.inputs() {
             if input.features.maturity > self.header.height {
                 return Err(BlockValidationError::InputMaturity);
             }
@@ -132,7 +131,8 @@ impl Block {
         Vec<TransactionOutput>,
         Vec<TransactionKernel>,
     ) {
-        (self.header, self.body.inputs, self.body.outputs, self.body.kernels)
+        let (i, o, k) = self.body.dissolve();
+        (self.header, i, o, k)
     }
 }
 
@@ -196,9 +196,10 @@ impl BlockBuilder {
     pub fn with_transactions(mut self, txs: Vec<Transaction>) -> Self {
         let iter = txs.into_iter();
         for tx in iter {
-            self = self.add_inputs(tx.body.inputs);
-            self = self.add_outputs(tx.body.outputs);
-            self = self.add_kernels(tx.body.kernels);
+            let (inputs, outputs, kernels) = tx.body.dissolve();
+            self = self.add_inputs(inputs);
+            self = self.add_outputs(outputs);
+            self = self.add_kernels(kernels);
             self.header.total_kernel_offset = self.header.total_kernel_offset + tx.offset;
         }
         self
@@ -206,9 +207,10 @@ impl BlockBuilder {
 
     /// This functions add the provided transactions to the block
     pub fn add_transaction(mut self, tx: Transaction) -> Self {
-        self = self.add_inputs(tx.body.inputs);
-        self = self.add_outputs(tx.body.outputs);
-        self = self.add_kernels(tx.body.kernels);
+        let (inputs, outputs, kernels) = tx.body.dissolve();
+        self = self.add_inputs(inputs);
+        self = self.add_outputs(outputs);
+        self = self.add_kernels(kernels);
         self.header.total_kernel_offset = &self.header.total_kernel_offset + &tx.offset;
         self
     }
