@@ -45,13 +45,12 @@ use tari_core::{
     transaction::{Transaction, UnblindedOutput},
     types::{PrivateKey, PublicKey},
 };
-use tokio::runtime::Runtime;
 use tari_utilities::hex::Hex;
+use tokio::runtime::Runtime;
 
 pub type TariWallet = Wallet;
 pub type WalletPublicKey = PrivateKey;
 pub type WalletDateTime = NaiveDateTime;
-pub type WalletNetAddress = NetAddress;
 
 /// -------------------------------- Runtime --------------------------------------------------- ///
 /// Example c++ Usage
@@ -153,33 +152,6 @@ pub unsafe extern "C" fn private_key_get_key(pk: *mut WalletPrivateKey) -> *mut 
     let mut result = CString::new("").unwrap();
     if !pk.is_null() {
         result = CString::new((*pk).to_hex()).unwrap();
-    }
-    CString::into_raw(result)
-}
-
-/// -------------------------------------------------------------------------------------------- ///
-
-/// -------------------------------- NetAddress ------------------------------------------------ ///
-#[no_mangle]
-pub unsafe extern "C" fn netaddress_create(address: *const c_char) -> *mut WalletNetAddress
-{
-    let str = CStr::from_ptr(address).to_str().unwrap().to_owned();
-    Box::into_raw(Box::new(str.parse::<WalletNetAddress>().unwrap() ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn netaddress_key_destroy(address: *mut WalletNetAddress) {
-    if !address.is_null() {
-        Box::from_raw(address);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn netaddress_get_ip(address: *mut WalletNetAddress) -> *mut c_char
-{
-    let mut result = CString::new("").unwrap();
-    if !address.is_null() {
-        result = CString::new((*address).to_string()).unwrap();
     }
     CString::into_raw(result)
 }
