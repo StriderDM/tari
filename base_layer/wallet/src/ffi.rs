@@ -29,28 +29,179 @@
 //! will be exposed via FFI and will consist of API calls that the FFI client can make into the Wallet module and a set
 //! of Callbacks that the client must implement and provide to the Wallet module to receive asynchronous replies and
 //! updates.
+extern crate libc;
 
-use crate::output_manager_service::service::PendingTransactionOutputs;
+use crate::{output_manager_service::service::PendingTransactionOutputs,Wallet};
 use chrono::NaiveDateTime;
-use std::os::raw::{c_char, c_int, c_uint, c_ulonglong};
+// use std::os::raw::{c_char, c_int, c_uint, c_ulonglong};
+use libc::{c_char,c_uchar,c_int,c_uint,c_ulonglong};
+use std::{
+    boxed::Box,
+    ffi::{CStr,CString},
+    ptr
+};
 use tari_comms::connection::NetAddress;
 use tari_core::{
     transaction::{Transaction, UnblindedOutput},
     types::{PrivateKey, PublicKey},
 };
+use tokio::runtime::Runtime;
+use tari_utilities::hex::Hex;
+
+pub type TariWallet = Wallet;
+pub type WalletPublicKey = PrivateKey;
+pub type WalletDateTime = NaiveDateTime;
+pub type WalletNetAddress = NetAddress;
+
+/// -------------------------------- Runtime --------------------------------------------------- ///
+/// Example c++ Usage
+/// class TokioRuntime
+/// {
+/// public:
+///   TokioRuntime* Instance()
+///   {
+///     static TokioRuntime* instance = NULL;
+///
+///     if (!instance)
+///     {
+///       instance = new TokioRuntime();
+///     }
+///     return instance;
+/// }
+/// private:
+///   MySingleton() { runtime_create(); }
+///   ~MySingleton() { runtime_destroy(instance); }
+/// }
+pub type TokioRuntime = Runtime;
+
+#[no_mangle]
+pub unsafe extern "C" fn runtime_create() -> *mut TokioRuntime
+{
+    let mut r = TokioRuntime::new().unwrap();
+    Box::into_raw(Box::new(r))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn runtime_destroy(runtime: *mut TokioRuntime) {
+    if !runtime.is_null() {
+        Box::from_raw(runtime);
+    }
+}
+/// -------------------------------------------------------------------------------------------- ///
+
+
+/// -------------------------------- Public Key ------------------------------------------------ ///
+/// Example c++ Usage
+/// class PublicKey
+/// {
+///  public:
+///    PublicKey(s:char*) { pointer = public_key_create(s); }
+///    const char* Get_Hex_Str() { return public_key_get_key(pointer); }
+///    ~PublicKey() { public_key_destroy(pointer); }
+/// private:
+///   PublicKey* pointer;
+/// }
+
+pub type WalletPrivateKey = PublicKey;
+
+#[no_mangle]
+pub unsafe extern "C" fn public_key_create(hex: *const c_char) -> *mut WalletPublicKey
+{
+    let str = CStr::from_ptr(hex).to_str().unwrap().to_owned();
+    let pk = WalletPublicKey::from_hex(str.as_str()).unwrap();//::from_hex(str);
+    Box::into_raw(Box::new(pk))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn public_key_destroy(pk: *mut WalletPublicKey) {
+    if !pk.is_null() {
+        Box::from_raw(pk);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn public_key_get_key(pk: *mut WalletPublicKey) -> *mut c_char
+{
+    let mut result = CString::new("").unwrap();
+    if !pk.is_null() {
+        result = CString::new((*pk).to_hex()).unwrap();
+    }
+    CString::into_raw(result)
+}
+
+/// -------------------------------------------------------------------------------------------- ///
+
+/// -------------------------------- Private Key ------------------------------------------------ ///
+#[no_mangle]
+pub unsafe extern "C" fn private_key_create(hex: *const c_char) -> *mut WalletPrivateKey
+{
+    let str = CStr::from_ptr(hex).to_str().unwrap().to_owned();
+    let pk = WalletPrivateKey::from_hex(str.as_str()).unwrap();//::from_hex(str);
+    Box::into_raw(Box::new(pk))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn private_key_destroy(pk: *mut WalletPrivateKey) {
+    if !pk.is_null() {
+        Box::from_raw(pk);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn private_key_get_key(pk: *mut WalletPrivateKey) -> *mut c_char
+{
+    let mut result = CString::new("").unwrap();
+    if !pk.is_null() {
+        result = CString::new((*pk).to_hex()).unwrap();
+    }
+    CString::into_raw(result)
+}
+
+/// -------------------------------------------------------------------------------------------- ///
+
+/// -------------------------------- NetAddress ------------------------------------------------ ///
+#[no_mangle]
+pub unsafe extern "C" fn netaddress_create(address: *const c_char) -> *mut WalletNetAddress
+{
+    let str = CStr::from_ptr(address).to_str().unwrap().to_owned();
+    Box::into_raw(Box::new(str.parse::<WalletNetAddress>().unwrap() ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn netaddress_key_destroy(address: *mut WalletNetAddress) {
+    if !address.is_null() {
+        Box::from_raw(address);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn netaddress_get_ip(address: *mut WalletNetAddress) -> *mut c_char
+{
+    let mut result = CString::new("").unwrap();
+    if !address.is_null() {
+        result = CString::new((*address).to_string()).unwrap();
+    }
+    CString::into_raw(result)
+}
+
+/// -------------------------------------------------------------------------------------------- ///
 
 // use tari_core::transaction_protocol::sender::RawTransactionInfo;
 
 // TODO implement this
-pub struct WalletFfi {}
+// Assuming this should look like this?
+// pub struct WalletFfi {
+//    runtime: tokio::runtime::Runtime,
+//    current_wallet: wallet
+// }
 
 pub struct IdentityFfi {
-    public_key: PublicKey,
-    secret_key: PrivateKey,
+    public_key: WalletPublicKey,
+    secret_key: WalletPrivateKey,
 }
 
 pub struct KeyManagerStateFfi {
-    master_seed: PrivateKey,
+    master_seed: WalletPrivateKey,
     branch_seed: String,
     index: c_uint,
 }
@@ -67,20 +218,21 @@ pub struct NetworkStatusFfi {}
 #[no_mangle]
 pub unsafe extern "C" fn create_wallet(
     // Local Node Identity data
-    public_key: *const c_char,         // Byte[32] - PublicKey
-    secret_key: *const c_char,         // Byte[32] - SecretKey
-    net_address: *const c_char,        // NetAddress
+    public_key: *const PublicKey,         // Byte[32] - PublicKey
+    secret_key: *const PrivateKey,         // Byte[32] - SecretKey
+    net_address: *const NetAddress,        // NetAddress
     datastore_path: *const c_char,     // String
     peer_database_name: *const c_char, // String
-) -> *mut WalletFfi
+) -> *mut Wallet
 {
+    Wallet::new();
     // Each item should be parsed from string to the native datatype to check it is properly formed i.e. a netaddress
     // must be of form "1.2.3.4:5678"
 }
 
 /// After the Wallet has been populated with the current state data this call starts it up.
 #[no_mangle]
-pub unsafe extern "C" fn start_wallet(wallet: *mut WalletFfi) -> bool {}
+pub unsafe extern "C" fn start_wallet(wallet: *mut Wallet) -> bool {}
 
 // Following methods are to populate the starting state of the wallet from the Clients persistent datastore which MUST
 // be done before starting the Wallet
@@ -88,7 +240,7 @@ pub unsafe extern "C" fn start_wallet(wallet: *mut WalletFfi) -> bool {}
 /// Set the Key Manager
 #[no_mangle]
 pub unsafe extern "C" fn set_key_manager(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     master_key: *const c_char,  // Byte[32] - PrivateKey
     branch_seed: *const c_char, // String,
     index: c_uint,
@@ -99,7 +251,7 @@ pub unsafe extern "C" fn set_key_manager(
 /// Add an output to the wallet. `spent` is a boolean that indicates if this output is a spent or unspent output.
 #[no_mangle]
 pub unsafe extern "C" fn add_output(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     spent: char,                 // Bool,
     value: c_ulonglong,          // u64
     spending_key: *const c_char, // Byte[32] - PrivateKey,
@@ -153,7 +305,7 @@ pub unsafe extern "C" fn add_output_to_received(
 /// Add an output to the wallet. `spent` is a boolean that indicates if this output is a spent or unspent output.
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_transaction_outputs(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     pending_tx: *mut PendingTransactionOutputs,
 ) -> bool
 {
@@ -212,12 +364,12 @@ pub unsafe extern "C" fn add_transaction_kernel(
 
 /// Add an completed transaction to the wallet.
 #[no_mangle]
-pub unsafe extern "C" fn add_transaction(wallet: *mut WalletFfi, pending_tx: *mut Transaction) -> bool {}
+pub unsafe extern "C" fn add_transaction(wallet: *mut Wallet, pending_tx: *mut Transaction) -> bool {}
 
 /// Add a ReceivedTransactionProtocol instance to the wallet
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_inbound_transaction(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     tx_id: c_ulonglong,               // u64,
     public_spend_key: *const c_char,  // Byte[32] - PublicKey,
     partial_signature: *const c_char, // Byte[32] - Signature,
@@ -318,7 +470,7 @@ pub unsafe extern "C" fn add_pending_outbound_signature(
 /// Add an completed transaction to the wallet.
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_outbound_transaction(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
 ) -> bool
 {
@@ -330,11 +482,11 @@ pub unsafe extern "C" fn add_pending_outbound_transaction(
 // ------------------------------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn generate_master_seed(wallet: *mut WalletFfi) -> *mut KeyManagerStateFfi {}
+pub unsafe extern "C" fn generate_master_seed(wallet: *mut Wallet) -> *mut KeyManagerStateFfi {}
 // TODO C Destructuring methods for the KeyManagerStateFfi struct
 
 #[no_mangle]
-pub unsafe extern "C" fn get_seed_words(wallet: *mut WalletFfi) -> *mut KeyManagerSeedWords {}
+pub unsafe extern "C" fn get_seed_words(wallet: *mut Wallet) -> *mut KeyManagerSeedWords {}
 // TODO C Destructuring methods for the KeyManagerSeedWords struct
 
 #[no_mangle]
@@ -350,7 +502,7 @@ pub unsafe extern "C" fn add_seed_word(
 
 #[no_mangle]
 pub unsafe extern "C" fn generate_key_manager_from_seed_words(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     seed_words: *mut KeyManagerSeedWords,
     branch_seed: *const c_char, // String
 ) -> bool
@@ -358,12 +510,12 @@ pub unsafe extern "C" fn generate_key_manager_from_seed_words(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn generate_identity(wallet: *mut WalletFfi) -> *mut IdentityFfi {}
+pub unsafe extern "C" fn generate_identity(wallet: *mut Wallet) -> *mut IdentityFfi {}
 // TODO C Destructuring methods for the IdentityFfi struct
 
 #[no_mangle]
 pub unsafe extern "C" fn add_base_node_peer(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     public_key: *const c_char,  // Byte[32] - PublicKey
     secret_key: *const c_char,  // Byte[32] - SecretKey
     net_address: *const c_char, // NetAddress
@@ -372,17 +524,17 @@ pub unsafe extern "C" fn add_base_node_peer(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn get_network_status(wallet: *mut WalletFfi) -> *mut NetworkStatusFfi {}
+pub unsafe extern "C" fn get_network_status(wallet: *mut Wallet) -> *mut NetworkStatusFfi {}
 // TODO C Destructuring methods for the NetworkStatusFfi struct
 
 #[no_mangle]
-pub unsafe extern "C" fn get_balance(wallet: *mut WalletFfi) -> c_ulonglong {}
+pub unsafe extern "C" fn get_balance(wallet: *mut Wallet) -> c_ulonglong {}
 
 // Create and send the first stage of a transaction to the specified wallet for the specified amount and with the
 // specified fee.
 #[no_mangle]
 pub unsafe extern "C" fn send_transaction(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     amount: c_ulonglong,       // MicroTari
     fee_per_gram: c_ulonglong, // MicroTari
     lock_height: c_ulonglong,  // u64
@@ -397,7 +549,7 @@ pub unsafe extern "C" fn send_transaction(
 
 /// Cancel a pending outbound transaction so that the wallet will not complete and broadcast it if a reply is received
 #[no_mangle]
-pub unsafe extern "C" fn cancel_transaction(wallet: *mut WalletFfi, tx_id: c_ulonglong) -> bool {}
+pub unsafe extern "C" fn cancel_transaction(wallet: *mut Wallet, tx_id: c_ulonglong) -> bool {}
 
 // ------------------------------------------------------------------------------------------------
 // Callback Functions
