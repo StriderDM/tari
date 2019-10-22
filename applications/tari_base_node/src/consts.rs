@@ -19,9 +19,9 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#![feature(type_alias_impl_trait)]
-pub mod output_manager_service;
-pub mod support;
-// pub mod text_message_service;
-pub mod transaction_service;
-pub mod wallet;
+//
+
+pub const VERSION: &str = "0.0.5";
+pub const AUTHOR: &str = "The Tari Community";
+pub const DEFAULT_CONFIG: &str = "config.toml";
+pub const DEFAULT_LOGCONFIG: &str = "log4rs.yml";
