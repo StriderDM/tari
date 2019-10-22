@@ -47,9 +47,12 @@ use tari_core::{
 };
 use tari_utilities::hex::Hex;
 use tokio::runtime::Runtime;
+use crate::wallet::WalletConfig;
+use crate::output_manager_service::handle::OutputManagerResponse::TransactionCancelled;
+use tari_core::transaction::{TransactionOutput, TransactionInput, TransactionKernel};
+use tari_comms::peer_manager::Peer;
 
 pub type TariWallet = Wallet;
-pub type WalletPublicKey = PrivateKey;
 pub type WalletDateTime = NaiveDateTime;
 
 /// -------------------------------- Runtime --------------------------------------------------- ///
@@ -87,7 +90,6 @@ pub unsafe extern "C" fn runtime_destroy(runtime: *mut TokioRuntime) {
     }
 }
 /// -------------------------------------------------------------------------------------------- ///
-
 
 /// -------------------------------- Public Key ------------------------------------------------ ///
 /// Example c++ Usage
@@ -130,7 +132,7 @@ pub unsafe extern "C" fn public_key_get_key(pk: *mut WalletPublicKey) -> *mut c_
 
 /// -------------------------------------------------------------------------------------------- ///
 
-/// -------------------------------- Private Key ------------------------------------------------ ///
+/// -------------------------------- Private Key ----------------------------------------------- ///
 /// Example c++ Usage
 /// class PrivateKey
 /// {
@@ -141,6 +143,7 @@ pub unsafe extern "C" fn public_key_get_key(pk: *mut WalletPublicKey) -> *mut c_
 /// private:
 ///   PrivateKey* pointer;
 /// }
+pub type WalletPublicKey = PrivateKey;
 
 #[no_mangle]
 pub unsafe extern "C" fn private_key_create(hex: *const c_char) -> *mut WalletPrivateKey
@@ -169,82 +172,123 @@ pub unsafe extern "C" fn private_key_get_key(pk: *mut WalletPrivateKey) -> *mut 
 
 /// -------------------------------------------------------------------------------------------- ///
 
-// use tari_core::transaction_protocol::sender::RawTransactionInfo;
-
-// TODO implement this
-// Assuming this should look like this?
-// pub struct WalletFfi {
-//    runtime: tokio::runtime::Runtime,
-//    current_wallet: wallet
-// }
-
-pub struct IdentityFfi {
-    public_key: WalletPublicKey,
-    secret_key: WalletPrivateKey,
+/// -------------------------------- KeyManagerWords ------------------------------------------- ///
+pub struct KeyManagerSeedWords {
+    words: Vec<String>,
 }
 
-pub struct KeyManagerStateFfi {
+/// Returns a pointer to the sent messages
+#[no_mangle]
+pub unsafe extern "C" fn keymanager_seed_words_create() -> *mut KeyManagerSeedWords {
+    let m =  KeyManagerSeedWords {
+        words: Vec::new()
+    };
+
+    let boxed = Box::new(m);
+    Box::into_raw(boxed)
+}
+
+/// Returns a pointer to the KeyManagerSeedWords vector
+#[no_mangle]
+pub unsafe extern "C" fn keymanager_seed_words_contents(
+    mgr: *mut KeyManagerSeedWords,
+    i: c_int,
+) -> *const c_char
+{
+    if mgr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let words = &mut (*mgr).words;
+    let word= words.get(i as usize).unwrap();
+    let m = CString::new(word.as_str()).unwrap();
+    CString::into_raw(m)
+}
+
+/// Returns the number of KeyManagerSeedWords, zero-indexed
+#[no_mangle]
+pub unsafe extern "C" fn keymanager_seed_words_add_word(s: *const c_char, mgr: *mut KeyManagerSeedWords) -> bool {
+    if mgr.is_null() {
+        return false;
+    }
+    let mut add = CString::new("").unwrap();
+    if !s.is_null() {
+        return false;
+    }
+    let str = CStr::from_ptr(s).to_str().unwrap().to_owned();
+    (*mgr).words.push(str);
+    return true
+}
+
+/// Returns the number of KeyManagerSeedWords, zero-indexed
+#[no_mangle]
+pub unsafe extern "C" fn keymanager_seed_words_length(vec: *const KeyManagerSeedWords) -> c_int {
+    if vec.is_null() {
+        return 0;
+    }
+
+    (&*vec).words.len() as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn keymanager_seed_words_destroy(obj: *mut KeyManagerSeedWords) {
+    // as a rule of thumb, freeing a null pointer is just a noop.
+    if obj.is_null() {
+        return;
+    }
+
+    Box::from_raw(obj);
+}
+
+/// -------------------------------------------------------------------------------------------- ///
+
+//pub struct NetworkStatusFfi {}
+/// -------------------------------- Comms Config ---------------------------------------------- ///
+
+
+/// -------------------------------------------------------------------------------------------- ///
+/// -------------------------------- OutputManager Config -------------------------------------- ///
+/// TODO
+
+/// -------------------------------------------------------------------------------------------- ///
+
+
+/// -------------------------------- Wallet Config --------------------------------------------- ///
+/// TODO
+/// -------------------------------------------------------------------------------------------- ///
+
+/// -------------------------------- KeyManagerState Config ------------------------------------ ///
+pub struct KeyManagerState {
     master_seed: WalletPrivateKey,
     branch_seed: String,
     index: c_uint,
 }
 
-pub struct KeyManagerSeedWords {
-    words: Vec<String>,
-}
-
-pub struct NetworkStatusFfi {}
-
-/// Returns a pointer to an initialized Wallet Ffi container. This container needs to be populated with the persistent
-/// data before it can be started.
-/// The generate_identity() function can provide the public_key, private_key data for you
-#[no_mangle]
-pub unsafe extern "C" fn create_wallet(
-    // Local Node Identity data
-    public_key: *const PublicKey,         // Byte[32] - PublicKey
-    secret_key: *const PrivateKey,         // Byte[32] - SecretKey
-    net_address: *const NetAddress,        // NetAddress
-    datastore_path: *const c_char,     // String
-    peer_database_name: *const c_char, // String
-) -> *mut Wallet
+pub unsafe extern "C" fn KeyManagerState_Create ( master_key: *const WalletPrivateKey,
+                                                  branch_seed: *mut c_char,
+                                                  index: c_uint) -> *mut KeyManagerState
 {
-    Wallet::new();
-    // Each item should be parsed from string to the native datatype to check it is properly formed i.e. a netaddress
-    // must be of form "1.2.3.4:5678"
+    let m = KeyManagerState {
+        master_seed : (*master_key).to_owned(),
+        branch_seed : CString::from_raw(branch_seed).to_str().unwrap().to_owned(),
+        index: index
+    };
+    Box::into_raw(Box::new(m))
 }
 
-/// After the Wallet has been populated with the current state data this call starts it up.
-#[no_mangle]
-pub unsafe extern "C" fn start_wallet(wallet: *mut Wallet) -> bool {}
-
-// Following methods are to populate the starting state of the wallet from the Clients persistent datastore which MUST
-// be done before starting the Wallet
-
-/// Set the Key Manager
-#[no_mangle]
-pub unsafe extern "C" fn set_key_manager(
-    wallet: *mut Wallet,
-    master_key: *const c_char,  // Byte[32] - PrivateKey
-    branch_seed: *const c_char, // String,
-    index: c_uint,
-) -> bool
+pub unsafe extern "C" fn KeyManagerState_Destroy (state: *mut KeyManagerState )
 {
+    if !state.is_null() {
+        Box::from_raw(state);
+    }
 }
+/// -------------------------------------------------------------------------------------------- ///
 
-/// Add an output to the wallet. `spent` is a boolean that indicates if this output is a spent or unspent output.
-#[no_mangle]
-pub unsafe extern "C" fn add_output(
-    wallet: *mut Wallet,
-    spent: char,                 // Bool,
-    value: c_ulonglong,          // u64
-    spending_key: *const c_char, // Byte[32] - PrivateKey,
-    feature_flags: c_char,       // OutputFlags,
-    maturity: c_ulonglong,       // u64
-) -> bool
-{
-}
+/// -----------------------------------------Unblinded Output------------------------------------ ///
+pub type WalletUnblindedOutput = UnblindedOutput;
+/// TODO
+/// -------------------------------------------------------------------------------------------- ///
 
-/// Initialize a PendingTransactionOutputs struct to be populated
+///----- PendingTransactionOutputs-------------------------------------------------------------- ///
 #[no_mangle]
 pub unsafe extern "C" fn create_pending_transaction_outputs(
     tx_id: c_ulonglong,       // u64
@@ -255,284 +299,445 @@ pub unsafe extern "C" fn create_pending_transaction_outputs(
         tx_id,
         outputs_to_be_spent: Vec::new(),
         outputs_to_be_received: Vec::new(),
-        timestamp: NaiveDateTime::parse_from_str("timestamp", "THE FORMAT WE CHOOSE").unwrap_or(NaiveDateTime::now), /* Use the rfc-3339 Format for this. */
+        timestamp: NaiveDateTime::parse_from_str("timestamp", "THE FORMAT WE CHOOSE").unwrap(), /* Use the rfc-3339 Format for this. */
     }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn destroy_pending_transaction_outputs(pto: *mut PendingTransactionOutputs)
+{
+    if !pto.is_null() {
+        Box::from_raw(pto);
+    }
+}
+/// -------------------------------------------------------------------------------------------- ///
+
+/// -------------------------------- Compound Inputs, Outputs, Kernels ------------------------- ///
+/// Initialize a Transaction struct to be populated
+pub struct TransactionInputs(Vec<TransactionInput>);
+pub struct TransactionOutputs(Vec<TransactionOutput>);
+pub struct TransactionKernels(Vec<TransactionKernel>);
+
+/// Add a transaction input to a transaction struct
+#[no_mangle]
+pub unsafe extern "C" fn add_transaction_input(
+    inputs: *mut TransactionInputs,
+    transaction: *mut TransactionInput
+) -> bool
+{
+    if !inputs.is_null() {
+        return false;
+    }
+
+    if !transaction.is_null() {
+        return false;
+    }
+
+    (*inputs).0.push((*transaction).clone());
+    return true;
+}
+
+/// Add a transaction output to a transaction struct
+#[no_mangle]
+pub unsafe extern "C" fn add_transaction_output(
+    outputs: *mut TransactionOutputs,
+    transaction: *mut TransactionOutput
+) -> bool
+{
+    if !outputs.is_null() {
+        return false;
+    }
+
+    if !transaction.is_null() {
+        return false;
+    }
+
+    (*outputs).0.push((*transaction).clone());
+    return true;
+}
+
+/// Add a transaction kernel to a transaction struct
+#[no_mangle]
+pub unsafe extern "C" fn add_transaction_kernel(
+    kernels: *mut TransactionKernels,
+    kernel: *mut TransactionKernel,
+) -> bool
+{
+    if !kernels.is_null() {
+        return false;
+    }
+
+    if !kernel.is_null() {
+        return false;
+    }
+
+    (*kernels).0.push((*kernel).clone());
+    return true;
+}
+
+/// -------------------------------------------------------------------------------------------- ///
+
+/// -------------------------------- Wallet ---------------------------------------------------- ///
+pub type WalletMasterConfig = WalletConfig;
+
+pub unsafe extern "C" fn create_wallet(
+    // Local Node Identity data
+    config: *const WalletMasterConfig,
+    runtime: *const TokioRuntime
+) -> *mut Wallet
+{
+    // TODO do null check for config, runtime
+    let mut w = Wallet::new((*config).clone(), &(*runtime)).unwrap();
+    Box::into_raw(Box::new(w))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn start_wallet(wallet: *mut Wallet, runtime: *const TokioRuntime) -> bool
+{
+    // (*wallet).start() ? true : false; implement start() on wallet
+    // i.e return (*wallet).start()
+    true
+}
+
+/// Set the Key Manager
+#[no_mangle]
+pub unsafe extern "C" fn set_key_manager(
+    wallet: *mut Wallet,
+    state: *mut KeyManagerState,
+    runtime: *mut TokioRuntime
+) -> bool
+{
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !state.is_null() {
+        return false;
+    }
+
+    if !runtime.is_null() {
+        return false;
+    }
+    // (*wallet).key_manager.state = (*state) ? true : false; implement SetState() on Wallet
+    // i.e return (*wallet).SetState((*state));
+    return true;
+}
+
+/// Add an output to the wallet. `spent` is a boolean that indicates if this output is a spent or unspent output.
+#[no_mangle]
+pub unsafe extern "C" fn add_output(
+    wallet: *mut Wallet,
+    runtime: *mut TokioRuntime,
+    output: *mut WalletUnblindedOutput,
+) -> bool
+{
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !runtime.is_null() {
+        return false;
+    }
+
+    if !output.is_null() {
+        return false;
+    }
+
+    (*wallet).output_manager_service.add_output((*output).clone()); // ? true : false; implement AddOutput(O: UnblindedOutput) -> bool on Wallet
+    // i.e return (*wallet).addOutput((*output));
+    return true;
 }
 
 /// Append an UnblindedOutput to be spent to the pending transaction outputs object
 #[no_mangle]
 pub unsafe extern "C" fn add_output_to_spend(
-    pending_tx: *mut PendingTransactionOutputs,
-    value: c_ulonglong,
-    spending_key: *const c_char,
-    feature_flags: c_char, // OutputFlags,
-    maturity: c_ulonglong, // u64
+    wallet: *mut TariWallet,
+    output: *mut WalletUnblindedOutput,
+    runtime: *mut TokioRuntime,
 ) -> bool
 {
-    // append this output to PendingTransactionOutputs.outputs_to_be_spent
+    if !runtime.is_null() {
+        return false;
+    }
+
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !output.is_null() {
+        return false;
+    }
+
+    // (*wallet).pendingtransactionoutputs.addSpendoutput((*output)) ? true : false;
+    return true;
 }
 
-/// Append an UnblindedOutput to be recieved to the pending transaction outputs object
+/// Append an UnblindedOutput to be received to the pending transaction outputs object
 #[no_mangle]
 pub unsafe extern "C" fn add_output_to_received(
-    pending_tx: *mut PendingTransactionOutputs,
-    value: c_ulonglong,
-    spending_key: *const c_char,
-    feature_flags: c_char, // OutputFlags,
-    maturity: c_ulonglong, // u64
+    wallet: *mut TariWallet,
+    output: *mut WalletUnblindedOutput,
+    runtime: *mut TokioRuntime,
 ) -> bool
 {
-    // append this output to PendingTransactionOutputs.outputs_to_be_received
+    if !runtime.is_null() {
+        return false;
+    }
+
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !output.is_null() {
+        return false;
+    }
+
+    // (*wallet).pendingtransactionoutputs.addReceivedoutput((*output)) ? true : false;
+    return true;
 }
 
 /// Add an output to the wallet. `spent` is a boolean that indicates if this output is a spent or unspent output.
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_transaction_outputs(
     wallet: *mut Wallet,
-    pending_tx: *mut PendingTransactionOutputs,
+    runtime: *mut TokioRuntime,
+    output: *mut PendingTransactionOutputs,
+    spent: bool
 ) -> bool
 {
-    // append this data to the wallet
+    if !runtime.is_null() {
+        return false;
+    }
+
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !output.is_null() {
+        return false;
+    }
+
+    match spent
+        {
+            true => {}//(*wallet).pendingtransactionoutputs.addSpentOutput((*output)) ? true : false;
+            false => {}//(*wallet).pendingtransactionoutputs.addReceivedOutput((*output)) ? true : false;
+        }
+    return true;
 }
 
-/// Initialize a Transaction struct to be populated
+/// TODO Methods to construct, free above 3 types
+
 #[no_mangle]
 pub unsafe extern "C" fn create_transaction(
-    tx_id: c_ulonglong,    // u64
-    offset: *const c_char, // Byte[32] - PrivateKey
+    inputs: *mut TransactionInputs,
+    outputs: *mut TransactionOutputs,
+    kernels: *mut TransactionKernels,
+    offset: *const PrivateKey,
 ) -> *mut Transaction
 {
-}
-
-/// Add a transaction input to a transaction struct
-#[no_mangle]
-pub unsafe extern "C" fn add_transaction_input(
-    transaction: *mut Transaction,
-    commitment: *const c_char, // Byte[32] - Commitment
-    feature_flags: c_char,     // OutputFlags,
-    maturity: c_ulonglong,     // u64
-) -> bool
-{
-    // append input to tx
-}
-
-/// Add a transaction output to a transaction struct
-#[no_mangle]
-pub unsafe extern "C" fn add_transaction_output(
-    transaction: *mut Transaction,
-    commitment: *const c_char, // Byte[32] - Commitment
-    proof: *const c_char,      // Byte[32] - Rangeproof
-    feature_flags: c_char,     // OutputFlags,
-    maturity: c_ulonglong,     // u64
-) -> bool
-{
-    // append output to tx
-}
-
-/// Add a transaction kernel to a transaction struct
-#[no_mangle]
-pub unsafe extern "C" fn add_transaction_kernel(
-    transaction: *mut Transaction,
-    features: c_char, // KernelFeatures,
-    fee: c_ulonglong, // MicroTari,
-    lock_height: u64,
-    meta_info: *const c_char,     // Option<Byte[32]> - Option<HashOutput>,
-    linked_kernel: *const c_char, // Option<Byte[32]> - Option<HashOutput>,
-    excess: *const c_char,        // Byte[32] - Commitment,
-    excess_sig: *const c_char,    // Byte[32] - Signature,
-) -> bool
-{
-    // append kernel to tx
+    ///TODO null check
+    let t = Transaction::new((*inputs).0.clone(),(*outputs).0.clone(),(*kernels).0.clone(),(*offset).clone());
+    Box::into_raw(Box::new(t))
 }
 
 /// Add an completed transaction to the wallet.
+/// ??????????????????????????????????????????
 #[no_mangle]
-pub unsafe extern "C" fn add_transaction(wallet: *mut Wallet, pending_tx: *mut Transaction) -> bool {}
+pub unsafe extern "C" fn add_transaction(wallet: *mut Wallet, pending_tx: *mut Transaction, runtime: *mut TokioRuntime, inbound: bool) -> bool {
+    return true;
+}
 
 /// Add a ReceivedTransactionProtocol instance to the wallet
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_inbound_transaction(
     wallet: *mut Wallet,
-    tx_id: c_ulonglong,               // u64,
-    public_spend_key: *const c_char,  // Byte[32] - PublicKey,
-    partial_signature: *const c_char, // Byte[32] - Signature,
-    // TransactionOutput
-    commitment: *const c_char, // Byte[32] - Commitment
-    proof: *const c_char,      // Byte[32] - Rangeproof
-    feature_flags: c_char,     // OutputFlags,
-    maturity: c_ulonglong,     // u64
+    transaction: *mut Transaction,
+    runtime: *mut TokioRuntime
 ) -> bool
 {
+    if !runtime.is_null() {
+        return false;
+    }
+
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !transaction.is_null() {
+        return false;
+    }
+
+    //(*wallet).pendingtransactionoutputs.addinboundtransaction((*transaction)) ? true : false;
+
+    return true;
+    // append this data to the wallet.
+    // Assume it is RecipientState::Finalized
+    // TODO figure out best way to get this into the Rust struct, the protocol structs are strictly locked down
+}
+
+/// Add a ReceivedTransactionProtocol instance to the wallet
+#[no_mangle]
+pub unsafe extern "C" fn add_pending_outbound_transaction(
+    wallet: *mut Wallet,
+    transaction: *mut Transaction,
+    runtime: *mut TokioRuntime
+) -> bool
+{
+    if !runtime.is_null() {
+        return false;
+    }
+
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !transaction.is_null() {
+        return false;
+    }
+
+    //(*wallet).pendingtransactionoutputs.addoutboundtransaction((*transaction)) ? true : false;
+
+    return true;
     // append this data to the wallet.
     // Assume it is RecipientState::Finalized
     // TODO figure out best way to get this into the Rust struct, the protocol structs are strictly locked down
 }
 
 /// Create an initial RawTransactionInfo struct that will be used to build the SenderTransactionProtocol
-#[no_mangle]
-pub unsafe extern "C" fn create_pending_outbound_transaction(
-    num_recipients: c_uint,                // usize,
-    amount_to_self: c_ulonglong,           // MicroTari,
-    change: c_ulonglong,                   // MicroTari,
-    offset: *const c_char,                 // Byte[32] - BlindingFactor,
-    offset_blinding_factor: *const c_char, // Byte[32] - BlindingFactor,
-    public_excess: *const c_char,          // Byte[32] - PublicKey,
-    private_nonce: *const c_char,          // Byte[32] - PrivateKey,
-    public_nonce: *const c_char,           // Byte[32] - PublicKey,
-    public_nonce_sum: *const c_char,       // Byte[32] - PublicKey,
+//#[no_mangle]
+//pub unsafe extern "C" fn create_pending_outbound_transaction(
+//    num_recipients: c_uint,                // usize,
+//    amount_to_self: c_ulonglong,           // MicroTari,
+//    change: c_ulonglong,                   // MicroTari,
+//    offset: *const c_char,                 // Byte[32] - BlindingFactor,
+//    offset_blinding_factor: *const c_char, // Byte[32] - BlindingFactor,
+//    public_excess: *const c_char,          // Byte[32] - PublicKey,
+//    private_nonce: *const c_char,          // Byte[32] - PrivateKey,
+//    public_nonce: *const c_char,           // Byte[32] - PublicKey,
+//    public_nonce_sum: *const c_char,       // Byte[32] - PublicKey,
     // Metadata members
-    fee: c_ulonglong,             // MicroTari,
-    lock_height: c_ulonglong,     // u64,
-    meta_info: *const c_char,     // Option<Byte[32]> - Option<HashOutput>,
-    linked_kernel: *const c_char, // Option<Byte[32]> - Option<HashOutput>,
+//    fee: c_ulonglong,             // MicroTari,
+//    lock_height: c_ulonglong,     // u64,
+//    meta_info: *const c_char,     // Option<Byte[32]> - Option<HashOutput>,
+//    linked_kernel: *const c_char, // Option<Byte[32]> - Option<HashOutput>,
     // RecipientInfo members
-    tx_id: c_ulonglong,               // u64,
-    output: *const c_char,            // Byte[32] - TransactionOutput,
-    public_spend_key: *const c_char,  // Byte[32] - PublicKey,
-    partial_signature: *const c_char, // Byte[32] - Signature,
-) -> () //*mut RawTransactionInfo, //TODO Figure out the best way to expose this struct for this interface
-{
-    // create the initial RawTransactionInfo struct that will be used to construct the pending outbound transaction
-}
+//    tx_id: c_ulonglong,               // u64,
+//    output: *const c_char,            // Byte[32] - TransactionOutput,
+//    public_spend_key: *const c_char,  // Byte[32] - PublicKey,
+// partial_signature: *const c_char, // Byte[32] - Signature,
+//) -> () //*mut RawTransactionInfo, //TODO Figure out the best way to expose this struct for this interface
+//{
 
-/// Append an id to a pending outbound transaction RawTransactionInfo struct
-#[no_mangle]
-pub unsafe extern "C" fn add_pending_outbound_id(
-    // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    id: c_ulonglong,
-) -> bool
-{
-    // append id
-}
+//}
 
-/// Append an id to a pending outbound transaction RawTransactionInfo struct
-#[no_mangle]
-pub unsafe extern "C" fn add_pending_outbound_amount(
-    // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    amount: c_ulonglong,
-) -> bool
-{
-    // append amount
-}
+/// ------------------------------------------------------------------------------------------- ///
 
-/// Append an id to a pending outbound transaction RawTransactionInfo struct
-#[no_mangle]
-pub unsafe extern "C" fn add_pending_outbound_input(
-    // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    commitment: *const c_char, // Byte[32] - Commitment
-    feature_flags: c_char,     // OutputFlags,
-    maturity: c_ulonglong,     // u64
-) -> bool
-{
-    // append input
-}
-
-/// Append an id to a pending outbound transaction RawTransactionInfo struct
-#[no_mangle]
-pub unsafe extern "C" fn add_pending_outbound_output(
-    // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    commitment: *const c_char, // Byte[32] - Commitment
-    proof: *const c_char,      // Byte[32] - Rangeproof
-    feature_flags: c_char,     // OutputFlags,
-    maturity: c_ulonglong,     // u64
-) -> bool
-{
-    // append output
-}
-
-/// Append an id to a pending outbound transaction RawTransactionInfo struct
-#[no_mangle]
-pub unsafe extern "C" fn add_pending_outbound_signature(
-    // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    signature: *const c_char, // Byte[32] - Signature
-) -> bool
-{
-    // append signature
-}
-
-/// Add an completed transaction to the wallet.
-#[no_mangle]
-pub unsafe extern "C" fn add_pending_outbound_transaction(
-    wallet: *mut Wallet,
-    // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-) -> bool
-{
-    // Build the SenderTransactionProtocol and append it.
-}
 
 // ------------------------------------------------------------------------------------------------
 // API Functions
 // ------------------------------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn generate_master_seed(wallet: *mut Wallet) -> *mut KeyManagerStateFfi {}
-// TODO C Destructuring methods for the KeyManagerStateFfi struct
+//#[no_mangle]
+//pub unsafe extern "C" fn generate_master_seed(wallet: *mut Wallet) -> *mut KeyManagerStateFfi {}
+//TODO C Destructuring methods for the KeyManagerStateFfi struct
 
-#[no_mangle]
-pub unsafe extern "C" fn get_seed_words(wallet: *mut Wallet) -> *mut KeyManagerSeedWords {}
+//#[no_mangle]
+//pub unsafe extern "C" fn get_seed_words(wallet: *mut Wallet) -> *mut KeyManagerSeedWords {}
 // TODO C Destructuring methods for the KeyManagerSeedWords struct
 
-#[no_mangle]
-pub unsafe extern "C" fn create_seed_words() -> KeyManagerSeedWords {}
+//#[no_mangle]
+//pub unsafe extern "C" fn generate_key_manager_from_seed_words(
+//wallet: *mut Wallet,
+//    seed_words: *mut KeyManagerSeedWords,
+//    branch_seed: *const c_char, // String
+//) -> bool
+//{
+//}
 
-#[no_mangle]
-pub unsafe extern "C" fn add_seed_word(
-    seed_words: *mut KeyManagerSeedWords,
-    word: *const c_char, // String
-) -> bool
-{
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn generate_key_manager_from_seed_words(
-    wallet: *mut Wallet,
-    seed_words: *mut KeyManagerSeedWords,
-    branch_seed: *const c_char, // String
-) -> bool
-{
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn generate_identity(wallet: *mut Wallet) -> *mut IdentityFfi {}
+//#[no_mangle]
+//pub unsafe extern "C" fn generate_identity(wallet: *mut Wallet) -> *mut IdentityFfi {}
 // TODO C Destructuring methods for the IdentityFfi struct
 
 #[no_mangle]
 pub unsafe extern "C" fn add_base_node_peer(
     wallet: *mut Wallet,
-    public_key: *const c_char,  // Byte[32] - PublicKey
-    secret_key: *const c_char,  // Byte[32] - SecretKey
-    net_address: *const c_char, // NetAddress
+    runtime: *mut TokioRuntime,
+    peer: *mut Peer,
 ) -> bool
 {
+    if !runtime.is_null() {
+        return false;
+    }
+
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !peer.is_null() {
+        return false;
+    }
+
+    // (*wallet).addPeer((*peer));
+    return true;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn get_network_status(wallet: *mut Wallet) -> *mut NetworkStatusFfi {}
+//#[no_mangle]
+//pub unsafe extern "C" fn get_network_status(wallet: *mut Wallet) -> *mut NetworkStatusFfi {}
 // TODO C Destructuring methods for the NetworkStatusFfi struct
 
 #[no_mangle]
-pub unsafe extern "C" fn get_balance(wallet: *mut Wallet) -> c_ulonglong {}
+pub unsafe extern "C" fn get_balance(wallet: *mut Wallet) -> c_ulonglong {
+    //(*wallet).getBalance();
+    return 0;
+}
 
 // Create and send the first stage of a transaction to the specified wallet for the specified amount and with the
 // specified fee.
 #[no_mangle]
 pub unsafe extern "C" fn send_transaction(
     wallet: *mut Wallet,
-    amount: c_ulonglong,       // MicroTari
-    fee_per_gram: c_ulonglong, // MicroTari
-    lock_height: c_ulonglong,  // u64
-    // Destination Node Peer
-    public_key: *const c_char,  // Byte[32] - PublicKey
-    net_address: *const c_char, // NetAddress
+    runtime: *mut TokioRuntime,
+    peer: *mut Peer,
+    transaction: *mut Transaction
 ) -> bool
 {
-    // This function will need to check if the peer already exists and if not create it before sending
-    // A callback will be used by LibWallet to send the resultant data back to the client for storage.
+    if !runtime.is_null() {
+        return false;
+    }
+
+    if !wallet.is_null() {
+        return false;
+    }
+
+    if !transaction.is_null() {
+        return false;
+    }
+
+    if !peer.is_null() {
+        return false;
+    }
+    //(*wallet).sendTransaction((*transaction)) ? true : false
+    return true;
 }
 
 /// Cancel a pending outbound transaction so that the wallet will not complete and broadcast it if a reply is received
 #[no_mangle]
-pub unsafe extern "C" fn cancel_transaction(wallet: *mut Wallet, tx_id: c_ulonglong) -> bool {}
+pub unsafe extern "C" fn cancel_transaction(wallet: *mut Wallet, tr: *mut Transaction, runtime: *mut TokioRuntime) -> bool {
+        if !runtime.is_null() {
+            return false;
+        }
+
+        if !wallet.is_null() {
+            return false;
+        }
+
+        if !tr.is_null() {
+            return false;
+        }
+
+        //(*wallet).cancelTransaction ((*tr)) ? true : false
+        return true;
+}
 
 // ------------------------------------------------------------------------------------------------
 // Callback Functions

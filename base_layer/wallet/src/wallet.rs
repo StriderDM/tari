@@ -60,11 +60,11 @@ pub struct Wallet {
     pub liveness_service: LivenessHandle,
     pub output_manager_service: OutputManagerHandle,
     pub transaction_service: TransactionServiceHandle,
-    pub runtime: Runtime,
+    //pub runtime: Runtime,
 }
 
 impl Wallet {
-    pub fn new(config: WalletConfig, runtime: Runtime) -> Result<Wallet, WalletError> {
+    pub fn new(config: WalletConfig, runtime: &Runtime) -> Result<Wallet, WalletError> {
         let (publisher, subscription_factory) =
             pubsub_connector(runtime.executor(), config.comms_config.inbound_buffer_size);
         let subscription_factory = Arc::new(subscription_factory);
@@ -98,7 +98,7 @@ impl Wallet {
             liveness_service: liveness_handle,
             output_manager_service: output_manager_handle,
             transaction_service: transaction_service_handle,
-            runtime,
+            //runtime:runtime,
         })
     }
 
