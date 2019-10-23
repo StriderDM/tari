@@ -55,42 +55,6 @@ use tari_comms::peer_manager::Peer;
 pub type TariWallet = Wallet;
 pub type WalletDateTime = NaiveDateTime;
 
-/// -------------------------------- Runtime --------------------------------------------------- ///
-/// Example c++ Usage
-/// class TokioRuntime
-/// {
-/// public:
-///   TokioRuntime* Instance()
-///   {
-///     static TokioRuntime* instance = NULL;
-///
-///     if (!instance)
-///     {
-///        TokioRuntime();
-///     }
-///     return instance;
-/// }
-/// private:
-///   TokioRuntime() { instance = runtime_create(); }
-///   ~TokioRuntime() { runtime_destroy(instance); }
-/// }
-pub type TokioRuntime = Runtime;
-
-#[no_mangle]
-pub unsafe extern "C" fn runtime_create() -> *mut TokioRuntime
-{
-    let mut r = TokioRuntime::new().unwrap();
-    Box::into_raw(Box::new(r))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn runtime_destroy(runtime: *mut TokioRuntime) {
-    if !runtime.is_null() {
-        Box::from_raw(runtime);
-    }
-}
-/// -------------------------------------------------------------------------------------------- ///
-
 /// -------------------------------- Public Key ------------------------------------------------ ///
 /// Example c++ Usage
 /// class PublicKey
@@ -211,7 +175,7 @@ pub unsafe extern "C" fn keymanager_seed_words_add_word(s: *const c_char, mgr: *
         return false;
     }
     let mut add = CString::new("").unwrap();
-    if !s.is_null() {
+    if s.is_null() {
         return false;
     }
     let str = CStr::from_ptr(s).to_str().unwrap().to_owned();
@@ -325,11 +289,11 @@ pub unsafe extern "C" fn add_transaction_input(
     transaction: *mut TransactionInput
 ) -> bool
 {
-    if !inputs.is_null() {
+    if inputs.is_null() {
         return false;
     }
 
-    if !transaction.is_null() {
+    if transaction.is_null() {
         return false;
     }
 
@@ -344,11 +308,11 @@ pub unsafe extern "C" fn add_transaction_output(
     transaction: *mut TransactionOutput
 ) -> bool
 {
-    if !outputs.is_null() {
+    if outputs.is_null() {
         return false;
     }
 
-    if !transaction.is_null() {
+    if transaction.is_null() {
         return false;
     }
 
@@ -363,11 +327,11 @@ pub unsafe extern "C" fn add_transaction_kernel(
     kernel: *mut TransactionKernel,
 ) -> bool
 {
-    if !kernels.is_null() {
+    if kernels.is_null() {
         return false;
     }
 
-    if !kernel.is_null() {
+    if kernel.is_null() {
         return false;
     }
 
@@ -383,16 +347,16 @@ pub type WalletMasterConfig = WalletConfig;
 pub unsafe extern "C" fn create_wallet(
     // Local Node Identity data
     config: *const WalletMasterConfig,
-    runtime: *const TokioRuntime
 ) -> *mut Wallet
 {
     // TODO do null check for config, runtime
-    let mut w = Wallet::new((*config).clone(), &(*runtime)).unwrap();
-    Box::into_raw(Box::new(w))
+    let runtime = Runtime::new();
+    let mut w = Wallet::new((*config).clone(), runtime.unwrap());
+    Box::into_raw(Box::new(w.unwrap()))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn start_wallet(wallet: *mut Wallet, runtime: *const TokioRuntime) -> bool
+pub unsafe extern "C" fn start_wallet(wallet: *mut Wallet) -> bool
 {
     // (*wallet).start() ? true : false; implement start() on wallet
     // i.e return (*wallet).start()
@@ -404,20 +368,16 @@ pub unsafe extern "C" fn start_wallet(wallet: *mut Wallet, runtime: *const Tokio
 pub unsafe extern "C" fn set_key_manager(
     wallet: *mut Wallet,
     state: *mut KeyManagerState,
-    runtime: *mut TokioRuntime
 ) -> bool
 {
-    if !wallet.is_null() {
+    if wallet.is_null() {
         return false;
     }
 
-    if !state.is_null() {
+    if state.is_null() {
         return false;
     }
 
-    if !runtime.is_null() {
-        return false;
-    }
     // (*wallet).key_manager.state = (*state) ? true : false; implement SetState() on Wallet
     // i.e return (*wallet).SetState((*state));
     return true;
@@ -427,19 +387,14 @@ pub unsafe extern "C" fn set_key_manager(
 #[no_mangle]
 pub unsafe extern "C" fn add_output(
     wallet: *mut Wallet,
-    runtime: *mut TokioRuntime,
     output: *mut WalletUnblindedOutput,
 ) -> bool
 {
-    if !wallet.is_null() {
+    if wallet.is_null() {
         return false;
     }
 
-    if !runtime.is_null() {
-        return false;
-    }
-
-    if !output.is_null() {
+    if output.is_null() {
         return false;
     }
 
@@ -453,18 +408,13 @@ pub unsafe extern "C" fn add_output(
 pub unsafe extern "C" fn add_output_to_spend(
     wallet: *mut TariWallet,
     output: *mut WalletUnblindedOutput,
-    runtime: *mut TokioRuntime,
 ) -> bool
 {
-    if !runtime.is_null() {
+    if wallet.is_null() {
         return false;
     }
 
-    if !wallet.is_null() {
-        return false;
-    }
-
-    if !output.is_null() {
+    if output.is_null() {
         return false;
     }
 
@@ -477,18 +427,13 @@ pub unsafe extern "C" fn add_output_to_spend(
 pub unsafe extern "C" fn add_output_to_received(
     wallet: *mut TariWallet,
     output: *mut WalletUnblindedOutput,
-    runtime: *mut TokioRuntime,
 ) -> bool
 {
-    if !runtime.is_null() {
+    if wallet.is_null() {
         return false;
     }
 
-    if !wallet.is_null() {
-        return false;
-    }
-
-    if !output.is_null() {
+    if output.is_null() {
         return false;
     }
 
@@ -500,20 +445,16 @@ pub unsafe extern "C" fn add_output_to_received(
 #[no_mangle]
 pub unsafe extern "C" fn add_pending_transaction_outputs(
     wallet: *mut Wallet,
-    runtime: *mut TokioRuntime,
     output: *mut PendingTransactionOutputs,
     spent: bool
 ) -> bool
 {
-    if !runtime.is_null() {
+
+    if wallet.is_null() {
         return false;
     }
 
-    if !wallet.is_null() {
-        return false;
-    }
-
-    if !output.is_null() {
+    if output.is_null() {
         return false;
     }
 
@@ -543,7 +484,7 @@ pub unsafe extern "C" fn create_transaction(
 /// Add an completed transaction to the wallet.
 /// ??????????????????????????????????????????
 #[no_mangle]
-pub unsafe extern "C" fn add_transaction(wallet: *mut Wallet, pending_tx: *mut Transaction, runtime: *mut TokioRuntime, inbound: bool) -> bool {
+pub unsafe extern "C" fn add_transaction(wallet: *mut Wallet, pending_tx: *mut Transaction, inbound: bool) -> bool {
     return true;
 }
 
@@ -552,18 +493,13 @@ pub unsafe extern "C" fn add_transaction(wallet: *mut Wallet, pending_tx: *mut T
 pub unsafe extern "C" fn add_pending_inbound_transaction(
     wallet: *mut Wallet,
     transaction: *mut Transaction,
-    runtime: *mut TokioRuntime
 ) -> bool
 {
-    if !runtime.is_null() {
+    if wallet.is_null() {
         return false;
     }
 
-    if !wallet.is_null() {
-        return false;
-    }
-
-    if !transaction.is_null() {
+    if transaction.is_null() {
         return false;
     }
 
@@ -580,18 +516,13 @@ pub unsafe extern "C" fn add_pending_inbound_transaction(
 pub unsafe extern "C" fn add_pending_outbound_transaction(
     wallet: *mut Wallet,
     transaction: *mut Transaction,
-    runtime: *mut TokioRuntime
 ) -> bool
 {
-    if !runtime.is_null() {
+    if wallet.is_null() {
         return false;
     }
 
-    if !wallet.is_null() {
-        return false;
-    }
-
-    if !transaction.is_null() {
+    if transaction.is_null() {
         return false;
     }
 
@@ -661,19 +592,14 @@ pub unsafe extern "C" fn add_pending_outbound_transaction(
 #[no_mangle]
 pub unsafe extern "C" fn add_base_node_peer(
     wallet: *mut Wallet,
-    runtime: *mut TokioRuntime,
     peer: *mut Peer,
 ) -> bool
 {
-    if !runtime.is_null() {
+    if wallet.is_null() {
         return false;
     }
 
-    if !wallet.is_null() {
-        return false;
-    }
-
-    if !peer.is_null() {
+    if peer.is_null() {
         return false;
     }
 
@@ -696,24 +622,19 @@ pub unsafe extern "C" fn get_balance(wallet: *mut Wallet) -> c_ulonglong {
 #[no_mangle]
 pub unsafe extern "C" fn send_transaction(
     wallet: *mut Wallet,
-    runtime: *mut TokioRuntime,
     peer: *mut Peer,
     transaction: *mut Transaction
 ) -> bool
 {
-    if !runtime.is_null() {
+    if wallet.is_null() {
         return false;
     }
 
-    if !wallet.is_null() {
+    if transaction.is_null() {
         return false;
     }
 
-    if !transaction.is_null() {
-        return false;
-    }
-
-    if !peer.is_null() {
+    if peer.is_null() {
         return false;
     }
     //(*wallet).sendTransaction((*transaction)) ? true : false
@@ -722,16 +643,12 @@ pub unsafe extern "C" fn send_transaction(
 
 /// Cancel a pending outbound transaction so that the wallet will not complete and broadcast it if a reply is received
 #[no_mangle]
-pub unsafe extern "C" fn cancel_transaction(wallet: *mut Wallet, tr: *mut Transaction, runtime: *mut TokioRuntime) -> bool {
-        if !runtime.is_null() {
+pub unsafe extern "C" fn cancel_transaction(wallet: *mut Wallet, tr: *mut Transaction) -> bool {
+        if wallet.is_null() {
             return false;
         }
 
-        if !wallet.is_null() {
-            return false;
-        }
-
-        if !tr.is_null() {
+        if tr.is_null() {
             return false;
         }
 
