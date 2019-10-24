@@ -858,16 +858,18 @@ pub unsafe extern "C" fn wallet_add_pending_outbound_signature(
     // append signature
 }
 
+/*
 /// Add an completed transaction to the wallet.
 #[no_mangle]
 pub unsafe extern "C" fn wallet_add_pending_outbound_transaction(
-    wallet: *mut WalletFfi,
+    wallet: *mut Wallet,
     // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
 ) -> bool
 {
     return true;
     // Build the SenderTransactionProtocol and append it.
 }
+*/
 
 // ------------------------------------------------------------------------------------------------
 // API Functions
@@ -944,11 +946,7 @@ pub unsafe extern "C" fn wallet_cancel_transaction(wallet: *mut Wallet, tr: *mut
     return true;
 }
 
-/// ------------------------------------------------------------------------------------------- ///
 
-
-
-/// ------------------------------------------------------------------------------------------- ///
 // Callback Definition - Example
 
 // Will probably have to implement as a struct of callbacks in wallet, with wallet only calling the
