@@ -30,9 +30,9 @@
 //! of Callbacks that the client must implement and provide to the Wallet module to receive asynchronous replies and
 //! updates.
 extern crate libc;
-use libc::{c_char, c_int, c_uchar, c_uint, c_ulonglong};
 use crate::{output_manager_service::service::PendingTransactionOutputs, Wallet};
 use chrono::NaiveDateTime;
+use libc::{c_char, c_int, c_uchar, c_uint, c_ulonglong};
 // use std::os::raw::{c_char, c_int, c_uint, c_ulonglong};
 use crate::{
     output_manager_service::{handle::OutputManagerResponse::TransactionCancelled, OutputManagerConfig},
@@ -41,7 +41,9 @@ use crate::{
 use std::{
     boxed::Box,
     ffi::{CStr, CString},
+    process::Output,
     sync::{Arc, RwLock},
+    time::Duration,
 };
 use tari_comms::{
     connection::NetAddress,
@@ -50,18 +52,22 @@ use tari_comms::{
 };
 use tari_comms_dht::envelope::NodeDestination::NodeId;
 use tari_core::{
-    transaction::{Transaction, TransactionInput, TransactionKernel, TransactionOutput, UnblindedOutput, OutputFlags},
+    tari_amount::MicroTari,
+    transaction::{
+        OutputFeatures,
+        OutputFlags,
+        Transaction,
+        TransactionInput,
+        TransactionKernel,
+        TransactionOutput,
+        UnblindedOutput,
+    },
     types::{PrivateKey, PublicKey},
 };
 use tari_crypto::keys::SecretKey;
 use tari_p2p::initialization::CommsConfig;
-use tari_utilities::hex::Hex;
+use tari_utilities::{hex::Hex, ByteArray};
 use tokio::runtime::Runtime;
-use std::time::Duration;
-use tari_utilities::ByteArray;
-use tari_core::transaction::OutputFeatures;
-use tari_core::tari_amount::MicroTari;
-use std::process::Output;
 
 pub type TariWallet = Wallet;
 pub type WalletDateTime = NaiveDateTime;
@@ -77,8 +83,7 @@ pub unsafe extern "C" fn bytevector_create() -> *mut ByteVector {
 
 #[no_mangle]
 pub unsafe extern "C" fn bytevector_destroy(bytes: *mut ByteVector) {
-    if bytes.is_null()
-    {
+    if bytes.is_null() {
         let b = Box::from_raw(bytes);
     }
 }
@@ -90,11 +95,7 @@ pub unsafe extern "C" fn bytevector_add_byte(bytes: *mut ByteVector, byte: c_uch
 
 /// returns c_char at position in internal vector
 #[no_mangle]
-pub unsafe extern "C" fn bytevector_get_at(
-    ptr: *mut ByteVector,
-    i: c_int,
-) -> c_uchar
-{
+pub unsafe extern "C" fn bytevector_get_at(ptr: *mut ByteVector, i: c_int) -> c_uchar {
     (*ptr).0.clone()[i as usize]
 }
 
@@ -228,7 +229,9 @@ pub unsafe extern "C" fn peerfeatures_add(pf: *mut WalletPeerFeatures, feature: 
             1 => {
                 (*pf).add(PeerFeature::DhtStoreForward);
             },
-            _ => {(*pf).add(PeerFeature::MessagePropagation);}, //assumption
+            _ => {
+                (*pf).add(PeerFeature::MessagePropagation);
+            }, // assumption
         }
     }
 }
@@ -256,7 +259,7 @@ pub unsafe extern "C" fn commsconfig_create(
 {
     let mut str1 = CString::new("").unwrap().to_str().unwrap().to_owned();
     if !address.is_null() {
-       str1 = CStr::from_ptr(address).to_str().unwrap().to_owned();
+        str1 = CStr::from_ptr(address).to_str().unwrap().to_owned();
     }
     let mut str2 = CString::new("").unwrap().to_str().unwrap().to_owned();
     if !datastore.is_null() {
@@ -269,9 +272,7 @@ pub unsafe extern "C" fn commsconfig_create(
     let ni = NodeIdentity::new(
         (*secret_key).clone(),
         (*public_key).clone(),
-        str1
-            .parse::<NetAddress>()
-            .unwrap(),
+        str1.parse::<NetAddress>().unwrap(),
         (*peer_features).clone(),
     )
     .unwrap();
@@ -396,17 +397,22 @@ pub unsafe extern "C" fn keymanagerstate_destroy(state: *mut KeyManagerState) {
 /// -----------------------------------------UnblindedOutput------------------------------------ ///
 pub type WalletUnblindedOutput = UnblindedOutput;
 
-pub unsafe extern "C" fn walletunblindedoutput_create(value: c_ulonglong, spending_key: *mut ByteVector, maturity: c_ulonglong, flags: c_uchar) -> *mut WalletUnblindedOutput
+pub unsafe extern "C" fn walletunblindedoutput_create(
+    value: c_ulonglong,
+    spending_key: *mut ByteVector,
+    maturity: c_ulonglong,
+    flags: c_uchar,
+) -> *mut WalletUnblindedOutput
 {
     let amount = MicroTari::from(value);
     let pk = PrivateKey::from_bytes(&((*spending_key).0));
     let mut of = OutputFeatures::default();
     of.maturity = maturity;
-    //of.flags = flags;
-    let uo = WalletUnblindedOutput{
+    // of.flags = flags;
+    let uo = WalletUnblindedOutput {
         value: amount,
         spending_key: pk.unwrap(),
-        features: of
+        features: of,
     };
     Box::into_raw(Box::new(uo))
 }
@@ -467,51 +473,39 @@ pub unsafe extern "C" fn transactioninputs_add_transaction_input(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactioninputs_create() -> *mut TransactionInputs
-{
+pub unsafe extern "C" fn transactioninputs_create() -> *mut TransactionInputs {
     let i = TransactionInputs(Vec::new());
     Box::into_raw(Box::new(i))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactioninputs_destroy(
-    inputs: *mut TransactionInputs,
-)
-{
+pub unsafe extern "C" fn transactioninputs_destroy(inputs: *mut TransactionInputs) {
     if inputs.is_null() {
         let i = Box::from_raw(inputs);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactionoutputs_create() -> *mut TransactionOutputs
-{
+pub unsafe extern "C" fn transactionoutputs_create() -> *mut TransactionOutputs {
     let i = TransactionOutputs(Vec::new());
     Box::into_raw(Box::new(i))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactionoutputs_destroy(
-    inputs: *mut TransactionOutputs,
-)
-{
+pub unsafe extern "C" fn transactionoutputs_destroy(inputs: *mut TransactionOutputs) {
     if inputs.is_null() {
         let i = Box::from_raw(inputs);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactionkernels_create() -> *mut TransactionKernels
-{
-let i = TransactionKernels(Vec::new());
-Box::into_raw(Box::new(i))
+pub unsafe extern "C" fn transactionkernels_create() -> *mut TransactionKernels {
+    let i = TransactionKernels(Vec::new());
+    Box::into_raw(Box::new(i))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactionkernels_destroy(
-    kernels: *mut TransactionKernels,
-)
-{
+pub unsafe extern "C" fn transactionkernels_destroy(kernels: *mut TransactionKernels) {
     if kernels.is_null() {
         let i = Box::from_raw(kernels);
     }
@@ -614,7 +608,6 @@ pub unsafe extern "C" fn wallet_set_key_manager(wallet: *mut Wallet, state: *mut
     return true;
 }
 
-
 pub unsafe extern "C" fn wallet_attach_master_seed(wallet: *mut Wallet, seed: *mut KeyManagerSeedWords) -> bool {
     if wallet.is_null() {
         return false;
@@ -628,11 +621,9 @@ pub unsafe extern "C" fn wallet_attach_master_seed(wallet: *mut Wallet, seed: *m
 }
 
 pub unsafe extern "C" fn wallet_generate_master_seed(wallet: *mut Wallet) -> *mut KeyManagerSeedWords {
-    let mut seed = KeyManagerSeedWords{
-        words: vec![]
-    };
+    let mut seed = KeyManagerSeedWords { words: vec![] };
     if wallet.is_null() {
-        //seed.words = (*wallet).generate_seed();
+        // seed.words = (*wallet).generate_seed();
     }
     Box::into_raw(Box::new(seed))
 }
@@ -653,10 +644,13 @@ pub unsafe extern "C" fn wallet_add_outputs(wallet: *mut Wallet, output: *mut Wa
     return true;
 }
 
-
 /// Append an UnblindedOutput to be spent to the pending transaction outputs object
 #[no_mangle]
-pub unsafe extern "C" fn wallet_add_output_to_spend(wallet: *mut TariWallet, output: *mut WalletUnblindedOutput) -> bool {
+pub unsafe extern "C" fn wallet_add_output_to_spend(
+    wallet: *mut TariWallet,
+    output: *mut WalletUnblindedOutput,
+) -> bool
+{
     if wallet.is_null() {
         return false;
     }
@@ -671,7 +665,11 @@ pub unsafe extern "C" fn wallet_add_output_to_spend(wallet: *mut TariWallet, out
 
 /// Append an UnblindedOutput to be received to the pending transaction outputs object
 #[no_mangle]
-pub unsafe extern "C" fn wallet_add_output_to_received(wallet: *mut TariWallet, output: *mut WalletUnblindedOutput) -> bool {
+pub unsafe extern "C" fn wallet_add_output_to_received(
+    wallet: *mut TariWallet,
+    output: *mut WalletUnblindedOutput,
+) -> bool
+{
     if wallet.is_null() {
         return false;
     }
@@ -729,13 +727,22 @@ pub unsafe extern "C" fn wallet_create_transaction(
 
 /// Add an completed transaction to the wallet.
 #[no_mangle]
-pub unsafe extern "C" fn wallet_add_transaction(wallet: *mut Wallet, pending_tx: *mut Transaction, inbound: bool) -> bool {
+pub unsafe extern "C" fn wallet_add_transaction(
+    wallet: *mut Wallet,
+    pending_tx: *mut Transaction,
+    inbound: bool,
+) -> bool
+{
     return true;
 }
 
 /// Add a ReceivedTransactionProtocol instance to the wallet
 #[no_mangle]
-pub unsafe extern "C" fn wallet_add_pending_inbound_transaction(wallet: *mut Wallet, transaction: *mut Transaction) -> bool {
+pub unsafe extern "C" fn wallet_add_pending_inbound_transaction(
+    wallet: *mut Wallet,
+    transaction: *mut Transaction,
+) -> bool
+{
     if wallet.is_null() {
         return false;
     }
@@ -754,7 +761,11 @@ pub unsafe extern "C" fn wallet_add_pending_inbound_transaction(wallet: *mut Wal
 
 /// Add a ReceivedTransactionProtocol instance to the wallet
 #[no_mangle]
-pub unsafe extern "C" fn wallet_add_pending_outbound_transaction(wallet: *mut Wallet, transaction: *mut Transaction) -> bool {
+pub unsafe extern "C" fn wallet_add_pending_outbound_transaction(
+    wallet: *mut Wallet,
+    transaction: *mut Transaction,
+) -> bool
+{
     if wallet.is_null() {
         return false;
     }
@@ -837,10 +848,10 @@ pub unsafe extern "C" fn wallet_add_pending_outbound_input(
 #[no_mangle]
 pub unsafe extern "C" fn wallet_add_pending_outbound_output(
     // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-    commitment: ByteVector, // Byte[32] - Commitment, TODO
-    proof: ByteVector,      // Byte[32] - Rangeproof, TODO
-    feature_flags: OutputFlags,     // OutputFlags,
-    maturity: c_ulonglong,     // u64
+    commitment: ByteVector,     // Byte[32] - Commitment, TODO
+    proof: ByteVector,          // Byte[32] - Rangeproof, TODO
+    feature_flags: OutputFlags, // OutputFlags,
+    maturity: c_ulonglong,      // u64
 ) -> bool
 {
     return true;
@@ -858,18 +869,16 @@ pub unsafe extern "C" fn wallet_add_pending_outbound_signature(
     // append signature
 }
 
-/*
-/// Add an completed transaction to the wallet.
-#[no_mangle]
-pub unsafe extern "C" fn wallet_add_pending_outbound_transaction(
-    wallet: *mut Wallet,
-    // raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
-) -> bool
-{
-    return true;
-    // Build the SenderTransactionProtocol and append it.
-}
-*/
+// Add an completed transaction to the wallet.
+// #[no_mangle]
+// pub unsafe extern "C" fn wallet_add_pending_outbound_transaction(
+// wallet: *mut Wallet,
+// raw_info: *mut RawTransactionInfo, //TODO RawTransactionInfo is private
+// ) -> bool
+// {
+// return true;
+// Build the SenderTransactionProtocol and append it.
+// }
 
 // ------------------------------------------------------------------------------------------------
 // API Functions
@@ -915,7 +924,12 @@ pub unsafe extern "C" fn wallet_get_balance(wallet: *mut Wallet) -> c_ulonglong 
 // Create and send the first stage of a transaction to the specified wallet for the specified amount and with the
 // specified fee.
 #[no_mangle]
-pub unsafe extern "C" fn wallet_send_transaction(wallet: *mut Wallet, peer: *mut Peer, transaction: *mut Transaction) -> bool {
+pub unsafe extern "C" fn wallet_send_transaction(
+    wallet: *mut Wallet,
+    peer: *mut Peer,
+    transaction: *mut Transaction,
+) -> bool
+{
     if wallet.is_null() {
         return false;
     }
@@ -946,53 +960,49 @@ pub unsafe extern "C" fn wallet_cancel_transaction(wallet: *mut Wallet, tr: *mut
     return true;
 }
 
-
 // Callback Definition - Example
 
 // Will probably have to implement as a struct of callbacks in wallet, with wallet only calling the
 // functions if they are callable from the relevant wallet function, where the register callback functions
 // will bind the relevant c equivalent funciton pointer to the associated function
-/*
-The Rust
-
-use std::os::raw::{c_int, c_uchar};
-
-#[no_mangle]
-pub struct MyState {
-    pub call_back: extern "C" fn(*const c_uchar) -> c_int
-}
-
-#[no_mangle]
-pub extern fn get_state(call: extern "C" fn(*const c_uchar) -> c_int) -> *const () {
-    let state = MyState { call_back: call };
-    Box::into_raw(Box::new(state)) as *const _
-}
-
-#[no_mangle]
-pub extern fn run(state: *mut MyState) -> c_int {
-    unsafe {
-        ((*state).call_back)(format!("Callback run").as_ptr())
-    }
-}
-
-#[no_mangle]
-pub extern fn delete_state(state: *mut MyState) {
-    unsafe {
-        Box::from_raw(state);
-    }
-}
-
-The C
-#include <iostream>
-
-extern "C" {
-void* get_state(int (*callback)(char*));
-int run(void* state);
-void delete_state(void* state);
-}
-
-*/
-
+// The Rust
+//
+// use std::os::raw::{c_int, c_uchar};
+//
+// #[no_mangle]
+// pub struct MyState {
+// pub call_back: extern "C" fn(*const c_uchar) -> c_int
+// }
+//
+// #[no_mangle]
+// pub extern fn get_state(call: extern "C" fn(*const c_uchar) -> c_int) -> *const () {
+// let state = MyState { call_back: call };
+// Box::into_raw(Box::new(state)) as *const _
+// }
+//
+// #[no_mangle]
+// pub extern fn run(state: *mut MyState) -> c_int {
+// unsafe {
+// ((*state).call_back)(format!("Callback run").as_ptr())
+// }
+// }
+//
+// #[no_mangle]
+// pub extern fn delete_state(state: *mut MyState) {
+// unsafe {
+// Box::from_raw(state);
+// }
+// }
+//
+// The C
+// #include <iostream>
+//
+// extern "C" {
+// void* get_state(int (*callback)(char*));
+// int run(void* state);
+// void delete_state(void* state);
+// }
+//
 
 // ------------------------------------------------------------------------------------------------
 // Callback Functions
