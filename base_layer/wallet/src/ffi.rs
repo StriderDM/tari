@@ -38,13 +38,7 @@ use crate::{
     output_manager_service::{handle::OutputManagerResponse::TransactionCancelled, OutputManagerConfig},
     wallet::WalletConfig,
 };
-use std::{
-    boxed::Box,
-    ffi::{CStr, CString},
-    process::Output,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{boxed::Box, ffi::{CStr, CString}, process::Output, sync::{Arc, RwLock}, time::Duration, slice};
 use tari_comms::{
     connection::NetAddress,
     control_service::ControlServiceConfig,
@@ -76,42 +70,41 @@ pub type WalletDateTime = NaiveDateTime;
 pub struct ByteVector(Vec<c_uchar>); // declared like this so that it can be exposed to external header
 
 #[no_mangle]
-pub unsafe extern "C" fn bytevector_create() -> *mut ByteVector {
+pub unsafe extern "C" fn byte_vector_create(byte_array: *const c_uchar, element_count: c_int) -> *mut ByteVector {
     let bytes = ByteVector(Vec::new());
+    let mut v = Vec::new();
+    if !byte_array.is_null() {
+        let array: &[c_uchar] = slice::from_raw_parts(byte_array, element_count as usize);
+        v = array.to_vec();
+    }
     Box::into_raw(Box::new(bytes))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn bytevector_destroy(bytes: *mut ByteVector) {
+pub unsafe extern "C" fn byte_vector_destroy(bytes: *mut ByteVector) {
     if bytes.is_null() {
         let b = Box::from_raw(bytes);
     }
 }
 
-/// adds c_char to internal vec
-pub unsafe extern "C" fn bytevector_add_byte(bytes: *mut ByteVector, byte: c_uchar) {
-    (*bytes).0.push(byte);
-}
-
-/// returns c_char at position in internal vector
+/// returns c_uchar at position in internal vector
 #[no_mangle]
-pub unsafe extern "C" fn bytevector_get_at(ptr: *mut ByteVector, i: c_int) -> c_uchar {
+pub unsafe extern "C" fn byte_vector_get_at(ptr: *mut ByteVector, i: c_int) -> c_uchar {
     (*ptr).0.clone()[i as usize]
 }
 
 /// Returns the number of items, zero-indexed
 #[no_mangle]
-pub unsafe extern "C" fn bytevector_get_length(vec: *const ByteVector) -> c_int {
+pub unsafe extern "C" fn byte_vector_get_length(vec: *const ByteVector) -> c_int {
     if vec.is_null() {
         return 0;
     }
     (&*vec).0.len() as c_int
 }
-
 /// -------------------------------------------------------------------------------------------- ///
 
 /// -------------------------------- Public Key ------------------------------------------------ ///
-pub type WalletPrivateKey = PublicKey;
+pub type WalletPublicKey = PublicKey;
 
 #[no_mangle]
 pub unsafe extern "C" fn public_key_create(bytes: *mut ByteVector) -> *mut WalletPublicKey {
@@ -142,10 +135,10 @@ pub unsafe extern "C" fn public_key_get_key(pk: *mut WalletPublicKey) -> *mut By
 /// -------------------------------------------------------------------------------------------- ///
 
 /// -------------------------------- Private Key ----------------------------------------------- ///
-pub type WalletPublicKey = PrivateKey;
+pub type WalletPrivateKey = PrivateKey;
 
 #[no_mangle]
-pub unsafe extern "C" fn privatekey_create(bytes: *mut ByteVector) -> *mut WalletPrivateKey {
+pub unsafe extern "C" fn private_key_create(bytes: *mut ByteVector) -> *mut WalletPrivateKey {
     let mut v = Vec::new();
     if !bytes.is_null() {
         v = (*bytes).0.clone();
@@ -155,14 +148,14 @@ pub unsafe extern "C" fn privatekey_create(bytes: *mut ByteVector) -> *mut Walle
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn privatekey_destroy(pk: *mut WalletPrivateKey) {
+pub unsafe extern "C" fn private_key_destroy(pk: *mut WalletPrivateKey) {
     if !pk.is_null() {
         Box::from_raw(pk);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn privatekey_get_key(pk: *mut WalletPrivateKey) -> *mut ByteVector {
+pub unsafe extern "C" fn private_key_get_key(pk: *mut WalletPrivateKey) -> *mut ByteVector {
     let mut bytes = ByteVector(Vec::new());
     if !pk.is_null() {
         bytes.0 = (*pk).to_vec();
@@ -176,34 +169,34 @@ pub unsafe extern "C" fn privatekey_get_key(pk: *mut WalletPrivateKey) -> *mut B
 pub type WalletOutputManagerConfig = OutputManagerConfig;
 
 #[no_mangle]
-pub unsafe extern "C" fn outputmanagerconfig_create(
-    key: *mut PrivateKey,
-    b_seed: *mut c_char,
-    pki: c_ulonglong,
+pub unsafe extern "C" fn output_manager_config_create(
+    master_key: *mut PrivateKey,
+    branch_seed: *mut c_char,
+    primary_key_index: c_ulonglong,
 ) -> *mut WalletOutputManagerConfig
 {
     let mut rng = rand::OsRng::new().unwrap();
     let mut k = PrivateKey::random(&mut rng);
 
-    if !key.is_null() {
-        k = (*key).clone();
+    if !master_key.is_null() {
+        k = (*master_key).clone();
     }
 
     let mut str = CString::new("").unwrap().to_str().unwrap().to_owned();
-    if !b_seed.is_null() {
-        str = CStr::from_ptr(b_seed).to_str().unwrap().to_owned();
+    if !branch_seed.is_null() {
+        str = CStr::from_ptr(branch_seed).to_str().unwrap().to_owned();
     }
 
     let omc = WalletOutputManagerConfig {
         master_key: k,
         branch_seed: str.to_string(),
-        primary_key_index: pki as usize,
+        primary_key_index: primary_key_index as usize,
     };
     Box::into_raw(Box::new(omc))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn outputmanagerconfig_destroy(wc: *mut WalletOutputManagerConfig) {
+pub unsafe extern "C" fn output_manager_config_destroy(wc: *mut WalletOutputManagerConfig) {
     if !wc.is_null() {
         Box::from_raw(wc);
     }
@@ -214,7 +207,7 @@ pub unsafe extern "C" fn outputmanagerconfig_destroy(wc: *mut WalletOutputManage
 pub type WalletPeerFeatures = PeerFeatures;
 
 #[no_mangle]
-pub unsafe extern "C" fn peerfeatures_create() -> *mut WalletPeerFeatures {
+pub unsafe extern "C" fn peer_features_create() -> *mut WalletPeerFeatures {
     let pf = WalletPeerFeatures::new(Vec::new());
     Box::into_raw(Box::new(pf))
 }
@@ -237,7 +230,7 @@ pub unsafe extern "C" fn peerfeatures_add(pf: *mut WalletPeerFeatures, feature: 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn peerfeatures_destroy(pf: *mut WalletPeerFeatures) {
+pub unsafe extern "C" fn peer_features_destroy(pf: *mut WalletPeerFeatures) {
     if !pf.is_null() {
         Box::from_raw(pf);
     }
@@ -248,7 +241,7 @@ pub unsafe extern "C" fn peerfeatures_destroy(pf: *mut WalletPeerFeatures) {
 pub type WalletCommsConfig = CommsConfig;
 
 #[no_mangle]
-pub unsafe extern "C" fn commsconfig_create(
+pub unsafe extern "C" fn comms_config_create(
     address: *mut c_char,
     datastore: *mut c_char,
     database: *mut c_char,
@@ -297,7 +290,7 @@ pub unsafe extern "C" fn commsconfig_create(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn walletcommsconfig_destroy(wc: *mut WalletCommsConfig) {
+pub unsafe extern "C" fn wallet_comms_config_destroy(wc: *mut WalletCommsConfig) {
     if !wc.is_null() {
         Box::from_raw(wc);
     }
@@ -311,7 +304,7 @@ pub struct KeyManagerSeedWords {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn keymanagerseedwords_create() -> *mut KeyManagerSeedWords {
+pub unsafe extern "C" fn key_manager_seed_words_create() -> *mut KeyManagerSeedWords {
     let m = KeyManagerSeedWords { words: Vec::new() };
 
     let boxed = Box::new(m);
@@ -319,7 +312,7 @@ pub unsafe extern "C" fn keymanagerseedwords_create() -> *mut KeyManagerSeedWord
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn keymanagerseedwords_get_at(mgr: *mut KeyManagerSeedWords, i: c_int) -> *const c_char {
+pub unsafe extern "C" fn key_manager_seed_words_get_at(mgr: *mut KeyManagerSeedWords, i: c_int) -> *const c_char {
     if mgr.is_null() {
         return std::ptr::null_mut();
     }
@@ -330,7 +323,7 @@ pub unsafe extern "C" fn keymanagerseedwords_get_at(mgr: *mut KeyManagerSeedWord
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn keymanagerseedwords_add(s: *const c_char, mgr: *mut KeyManagerSeedWords) -> bool {
+pub unsafe extern "C" fn key_manager_seed_words_add(s: *const c_char, mgr: *mut KeyManagerSeedWords) -> bool {
     if mgr.is_null() {
         return false;
     }
@@ -344,7 +337,7 @@ pub unsafe extern "C" fn keymanagerseedwords_add(s: *const c_char, mgr: *mut Key
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn keymanagerseed_length(vec: *const KeyManagerSeedWords) -> c_int {
+pub unsafe extern "C" fn key_manager_seed_length(vec: *const KeyManagerSeedWords) -> c_int {
     if vec.is_null() {
         return 0;
     }
@@ -353,7 +346,7 @@ pub unsafe extern "C" fn keymanagerseed_length(vec: *const KeyManagerSeedWords) 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn keymanager_seed_words_destroy(obj: *mut KeyManagerSeedWords) {
+pub unsafe extern "C" fn key_manager_seed_words_destroy(obj: *mut KeyManagerSeedWords) {
     // as a rule of thumb, freeing a null pointer is just a noop.
     if obj.is_null() {
         return;
@@ -373,7 +366,7 @@ pub struct KeyManagerState {
     index: c_uint,
 }
 
-pub unsafe extern "C" fn keymanagerstate_create(
+pub unsafe extern "C" fn key_manager_state_create(
     master_key: *const WalletPrivateKey,
     branch_seed: *mut c_char,
     index: c_uint,
@@ -387,7 +380,7 @@ pub unsafe extern "C" fn keymanagerstate_create(
     Box::into_raw(Box::new(m))
 }
 
-pub unsafe extern "C" fn keymanagerstate_destroy(state: *mut KeyManagerState) {
+pub unsafe extern "C" fn key_manager_state_destroy(state: *mut KeyManagerState) {
     if !state.is_null() {
         Box::from_raw(state);
     }
@@ -397,7 +390,7 @@ pub unsafe extern "C" fn keymanagerstate_destroy(state: *mut KeyManagerState) {
 /// -----------------------------------------UnblindedOutput------------------------------------ ///
 pub type WalletUnblindedOutput = UnblindedOutput;
 
-pub unsafe extern "C" fn walletunblindedoutput_create(
+pub unsafe extern "C" fn wallet_unblinded_output_create(
     value: c_ulonglong,
     spending_key: *mut ByteVector,
     maturity: c_ulonglong,
@@ -417,7 +410,7 @@ pub unsafe extern "C" fn walletunblindedoutput_create(
     Box::into_raw(Box::new(uo))
 }
 
-pub unsafe extern "C" fn walletunblindedoutput_destroy(output: *mut WalletUnblindedOutput) {
+pub unsafe extern "C" fn wallet_unblinded_output_destroy(output: *mut WalletUnblindedOutput) {
     if !output.is_null() {
         Box::from_raw(output);
     }
@@ -455,7 +448,7 @@ pub struct TransactionOutputs(Vec<TransactionOutput>);
 pub struct TransactionKernels(Vec<TransactionKernel>);
 
 #[no_mangle]
-pub unsafe extern "C" fn transactioninputs_add_transaction_input(
+pub unsafe extern "C" fn transaction_inputs_add_transaction_input(
     inputs: *mut TransactionInputs,
     transaction: *mut TransactionInput,
 ) -> bool
@@ -473,46 +466,47 @@ pub unsafe extern "C" fn transactioninputs_add_transaction_input(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactioninputs_create() -> *mut TransactionInputs {
+pub unsafe extern "C" fn transaction_inputs_create() -> *mut TransactionInputs {
     let i = TransactionInputs(Vec::new());
     Box::into_raw(Box::new(i))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactioninputs_destroy(inputs: *mut TransactionInputs) {
+pub unsafe extern "C" fn transaction_inputs_destroy(inputs: *mut TransactionInputs) {
     if inputs.is_null() {
         let i = Box::from_raw(inputs);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactionoutputs_create() -> *mut TransactionOutputs {
+pub unsafe extern "C" fn transaction_outputs_create() -> *mut TransactionOutputs {
     let i = TransactionOutputs(Vec::new());
     Box::into_raw(Box::new(i))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactionoutputs_destroy(inputs: *mut TransactionOutputs) {
+pub unsafe extern "C" fn transaction_outputs_destroy(inputs: *mut TransactionOutputs) {
     if inputs.is_null() {
         let i = Box::from_raw(inputs);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactionkernels_create() -> *mut TransactionKernels {
+pub unsafe extern "C" fn transaction_kernels_create() -> *mut TransactionKernels {
     let i = TransactionKernels(Vec::new());
     Box::into_raw(Box::new(i))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn transactionkernels_destroy(kernels: *mut TransactionKernels) {
+pub unsafe extern "C" fn transaction_kernels_destroy(kernels: *mut TransactionKernels) {
     if kernels.is_null() {
         let i = Box::from_raw(kernels);
     }
 }
 
+/// Add a transaction input to a transaction struct
 #[no_mangle]
-pub unsafe extern "C" fn transactioninput_add_transaction_input(
+pub unsafe extern "C" fn transaction_input_add_transaction_input(
     inputs: *mut TransactionInputs,
     transaction: *mut TransactionInput,
 ) -> bool
@@ -531,7 +525,7 @@ pub unsafe extern "C" fn transactioninput_add_transaction_input(
 
 /// Add a transaction output to a transaction struct
 #[no_mangle]
-pub unsafe extern "C" fn transactionoutputs_add_transaction_output(
+pub unsafe extern "C" fn transaction_outputs_add_transaction_output(
     outputs: *mut TransactionOutputs,
     transaction: *mut TransactionOutput,
 ) -> bool
@@ -550,7 +544,7 @@ pub unsafe extern "C" fn transactionoutputs_add_transaction_output(
 
 /// Add a transaction kernel to a transaction struct
 #[no_mangle]
-pub unsafe extern "C" fn transactionkernels_add_transaction_kernel(
+pub unsafe extern "C" fn transaction_kernels_add_transaction_kernel(
     kernels: *mut TransactionKernels,
     kernel: *mut TransactionKernel,
 ) -> bool
@@ -608,7 +602,7 @@ pub unsafe extern "C" fn wallet_set_key_manager(wallet: *mut Wallet, state: *mut
     return true;
 }
 
-pub unsafe extern "C" fn wallet_attach_master_seed(wallet: *mut Wallet, seed: *mut KeyManagerSeedWords) -> bool {
+pub unsafe extern "C" fn wallet_set_master_seed(wallet: *mut Wallet, seed: *mut KeyManagerSeedWords) -> bool {
     if wallet.is_null() {
         return false;
     }
@@ -628,7 +622,7 @@ pub unsafe extern "C" fn wallet_generate_master_seed(wallet: *mut Wallet) -> *mu
     Box::into_raw(Box::new(seed))
 }
 
-/// Add an output to the wallet. `spent` is a boolean that indicates if this output is a spent or unspent output.
+/// Add an output to the wallet.
 #[no_mangle]
 pub unsafe extern "C" fn wallet_add_outputs(wallet: *mut Wallet, output: *mut WalletUnblindedOutput) -> bool {
     if wallet.is_null() {
@@ -947,16 +941,16 @@ pub unsafe extern "C" fn wallet_send_transaction(
 
 /// Cancel a pending outbound transaction so that the wallet will not complete and broadcast it if a reply is received
 #[no_mangle]
-pub unsafe extern "C" fn wallet_cancel_transaction(wallet: *mut Wallet, tr: *mut Transaction) -> bool {
+pub unsafe extern "C" fn wallet_cancel_transaction(wallet: *mut Wallet, tx_id: *mut ByteVector) -> bool {
     if wallet.is_null() {
         return false;
     }
 
-    if tr.is_null() {
+    if tx_id.is_null() {
         return false;
     }
 
-    //(*wallet).cancelTransaction ((*tr)) ? true : false
+    //(*wallet).cancelTransaction ((*tx_id)) ? true : false
     return true;
 }
 
