@@ -21,14 +21,15 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use super::middleware::MessageHandlerMiddleware;
-use crate::{config::DhtConfig, outbound::OutboundMessageRequester, store_forward::SAFStorage};
+use crate::{actor::DhtRequester, config::DhtConfig, outbound::OutboundMessageRequester, store_forward::SafStorage};
 use std::sync::Arc;
 use tari_comms::peer_manager::{NodeIdentity, PeerManager};
 use tower::layer::Layer;
 
 pub struct MessageHandlerLayer {
     config: DhtConfig,
-    store: Arc<SAFStorage>,
+    store: Arc<SafStorage>,
+    dht_requester: DhtRequester,
     peer_manager: Arc<PeerManager>,
     node_identity: Arc<NodeIdentity>,
     outbound_service: OutboundMessageRequester,
@@ -37,7 +38,8 @@ pub struct MessageHandlerLayer {
 impl MessageHandlerLayer {
     pub fn new(
         config: DhtConfig,
-        store: Arc<SAFStorage>,
+        store: Arc<SafStorage>,
+        dht_requester: DhtRequester,
         node_identity: Arc<NodeIdentity>,
         peer_manager: Arc<PeerManager>,
         outbound_service: OutboundMessageRequester,
@@ -46,6 +48,7 @@ impl MessageHandlerLayer {
         Self {
             config,
             store,
+            dht_requester,
             node_identity,
             peer_manager,
             outbound_service,
@@ -61,6 +64,7 @@ impl<S> Layer<S> for MessageHandlerLayer {
             self.config.clone(),
             service,
             Arc::clone(&self.store),
+            self.dht_requester.clone(),
             Arc::clone(&self.node_identity),
             Arc::clone(&self.peer_manager),
             self.outbound_service.clone(),

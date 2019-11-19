@@ -99,20 +99,20 @@ where
         match &message.encryption {
             OutboundEncryption::EncryptFor(public_key) => {
                 debug!(target: LOG_TARGET, "Encrypting message for {}", public_key);
-                let shared_secret = crypt::generate_ecdh_secret(&node_identity.secret_key, public_key);
+                let shared_secret = crypt::generate_ecdh_secret(node_identity.secret_key(), public_key);
                 message.body = crypt::encrypt(&shared_secret, &message.body)?;
             },
             OutboundEncryption::EncryptForDestination => {
                 debug!(
                     target: LOG_TARGET,
-                    "Encrypting message for peer with public key {}", message.peer_node_identity.public_key
+                    "Encrypting message for peer with public key {}", message.destination_peer.public_key
                 );
                 let shared_secret =
-                    crypt::generate_ecdh_secret(&node_identity.secret_key, &message.peer_node_identity.public_key);
+                    crypt::generate_ecdh_secret(node_identity.secret_key(), &message.destination_peer.public_key);
                 message.body = crypt::encrypt(&shared_secret, &message.body)?
             },
             OutboundEncryption::None => {
-                debug!(target: LOG_TARGET, "Encryption not set for message",);
+                debug!(target: LOG_TARGET, "Encryption not requested for message");
             },
         };
 
@@ -130,8 +130,9 @@ mod test {
     };
     use futures::executor::block_on;
     use tari_comms::{
+        connection::NetAddressesWithStats,
         message::MessageFlags,
-        peer_manager::{NodeId, PeerFeatures, PeerNodeIdentity},
+        peer_manager::{NodeId, Peer, PeerFeatures, PeerFlags},
         types::CommsPublicKey,
     };
     use tari_test_utils::panic_context;
@@ -140,17 +141,20 @@ mod test {
     fn no_encryption() {
         let spy = service_spy();
         let node_identity = make_node_identity();
-        let mut encryption = EncryptionLayer::new(Arc::clone(&node_identity)).layer(spy.service::<MiddlewareError>());
+        let mut encryption =
+            EncryptionLayer::new(Arc::clone(&node_identity)).layer(spy.to_service::<MiddlewareError>());
 
         panic_context!(cx);
         assert!(encryption.poll_ready(&mut cx).is_ready());
 
         let body = b"A".to_vec();
         let msg = DhtOutboundMessage::new(
-            PeerNodeIdentity::new(
-                NodeId::default(),
+            Peer::new(
                 CommsPublicKey::default(),
-                PeerFeatures::communication_node_default(),
+                NodeId::default(),
+                NetAddressesWithStats::new(vec![]),
+                PeerFlags::empty(),
+                PeerFeatures::COMMUNICATION_NODE,
             ),
             make_dht_header(&node_identity, &body, DhtMessageFlags::empty()),
             OutboundEncryption::None,
@@ -161,24 +165,27 @@ mod test {
 
         let msg = spy.pop_request().unwrap();
         assert_eq!(msg.body, body);
-        assert_eq!(msg.peer_node_identity.node_id, NodeId::default());
+        assert_eq!(msg.destination_peer.node_id, NodeId::default());
     }
 
     #[test]
     fn encryption() {
         let spy = service_spy();
         let node_identity = make_node_identity();
-        let mut encryption = EncryptionLayer::new(Arc::clone(&node_identity)).layer(spy.service::<MiddlewareError>());
+        let mut encryption =
+            EncryptionLayer::new(Arc::clone(&node_identity)).layer(spy.to_service::<MiddlewareError>());
 
         panic_context!(cx);
         assert!(encryption.poll_ready(&mut cx).is_ready());
 
         let body = b"A".to_vec();
         let msg = DhtOutboundMessage::new(
-            PeerNodeIdentity::new(
-                NodeId::default(),
+            Peer::new(
                 CommsPublicKey::default(),
-                PeerFeatures::communication_node_default(),
+                NodeId::default(),
+                NetAddressesWithStats::new(vec![]),
+                PeerFlags::empty(),
+                PeerFeatures::COMMUNICATION_NODE,
             ),
             make_dht_header(&node_identity, &body, DhtMessageFlags::ENCRYPTED),
             OutboundEncryption::EncryptForDestination,
@@ -189,6 +196,6 @@ mod test {
 
         let msg = spy.pop_request().unwrap();
         assert_ne!(msg.body, body);
-        assert_eq!(msg.peer_node_identity.node_id, NodeId::default());
+        assert_eq!(msg.destination_peer.node_id, NodeId::default());
     }
 }

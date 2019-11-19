@@ -103,6 +103,7 @@
 //! oms.send_message(...).await;
 //! ```
 
+#![recursion_limit = "256"]
 // Details: https://doc.rust-lang.org/beta/unstable-book/language-features/type-alias-impl-trait.html
 #![feature(type_alias_impl_trait)]
 
@@ -118,11 +119,17 @@ mod builder;
 mod config;
 mod consts;
 mod dht;
+mod discovery;
+mod proto;
+
+pub mod broadcast_strategy;
+pub mod domain_message;
 pub mod envelope;
 pub mod inbound;
 pub mod outbound;
 pub mod store_forward;
 
+pub use actor::{DhtActorError, DhtRequest, DhtRequester};
 pub use builder::DhtBuilder;
 pub use config::DhtConfig;
 pub use dht::Dht;

@@ -20,11 +20,14 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use super::broadcast_strategy::BroadcastStrategy;
-use crate::envelope::{DhtHeader, DhtMessageFlags, DhtMessageType, NodeDestination};
+use crate::{
+    broadcast_strategy::BroadcastStrategy,
+    envelope::{DhtMessageFlags, DhtMessageHeader, NodeDestination},
+    proto::envelope::DhtMessageType,
+};
 use futures::channel::oneshot;
 use std::fmt;
-use tari_comms::{message::MessageFlags, peer_manager::PeerNodeIdentity, types::CommsPublicKey};
+use tari_comms::{message::MessageFlags, peer_manager::Peer, types::CommsPublicKey};
 
 /// Determines if an outbound message should be Encrypted and, if so, for which public key
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +81,7 @@ pub struct ForwardRequest {
     /// Broadcast strategy to use when forwarding the message
     pub broadcast_strategy: BroadcastStrategy,
     /// Original header from the origin
-    pub dht_header: DhtHeader,
+    pub dht_header: DhtMessageHeader,
     /// Comms-level message flags
     pub comms_flags: MessageFlags,
     /// Message body
@@ -107,8 +110,8 @@ impl fmt::Display for DhtOutboundRequest {
 /// send a message
 #[derive(Clone, Debug)]
 pub struct DhtOutboundMessage {
-    pub peer_node_identity: PeerNodeIdentity,
-    pub dht_header: DhtHeader,
+    pub destination_peer: Peer,
+    pub dht_header: DhtMessageHeader,
     pub comms_flags: MessageFlags,
     pub encryption: OutboundEncryption,
     pub body: Vec<u8>,
@@ -117,15 +120,15 @@ pub struct DhtOutboundMessage {
 impl DhtOutboundMessage {
     /// Create a new DhtOutboundMessage
     pub fn new(
-        peer_node_identity: PeerNodeIdentity,
-        dht_header: DhtHeader,
+        destination_peer: Peer,
+        dht_header: DhtMessageHeader,
         encryption: OutboundEncryption,
         comms_flags: MessageFlags,
         body: Vec<u8>,
     ) -> Self
     {
         Self {
-            peer_node_identity,
+            destination_peer,
             dht_header,
             encryption,
             comms_flags,

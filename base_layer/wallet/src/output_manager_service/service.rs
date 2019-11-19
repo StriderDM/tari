@@ -24,60 +24,66 @@ use crate::{
     output_manager_service::{
         error::OutputManagerError,
         handle::{OutputManagerRequest, OutputManagerResponse},
+        storage::database::{OutputManagerBackend, OutputManagerDatabase, PendingTransactionOutputs},
+        OutputManagerConfig,
+        TxId,
     },
     types::{HashDigest, KeyDigest, TransactionRng},
 };
-use chrono::{Duration as ChronoDuration, NaiveDateTime, Utc};
+use chrono::Utc;
 use futures::{pin_mut, StreamExt};
 use log::*;
 use std::{collections::HashMap, sync::Mutex, time::Duration};
-use tari_core::{
+use tari_crypto::keys::SecretKey;
+use tari_key_manager::{
+    key_manager::KeyManager,
+    mnemonic::{from_secret_key, MnemonicLanguage},
+};
+use tari_service_framework::reply_channel;
+use tari_transactions::{
     fee::Fee,
     tari_amount::MicroTari,
     transaction::{OutputFeatures, TransactionInput, TransactionOutput, UnblindedOutput},
     types::{PrivateKey, COMMITMENT_FACTORY, PROVER},
     SenderTransactionProtocol,
 };
-use tari_crypto::keys::SecretKey;
-use tari_key_manager::keymanager::KeyManager;
-use tari_service_framework::reply_channel;
+
 const LOG_TARGET: &'static str = "base_layer::wallet::output_manager_service";
 
 /// This service will manage a wallet's available outputs and the key manager that produces the keys for these outputs.
 /// The service will assemble transactions to be sent from the wallets available outputs and provide keys to receive
 /// outputs. When the outputs are detected on the blockchain the Transaction service will call this Service to confirm
 /// them to be moved to the spent and unspent output lists respectively.
-pub struct OutputManagerService {
+pub struct OutputManagerService<T>
+where T: OutputManagerBackend
+{
     key_manager: Mutex<KeyManager<PrivateKey, KeyDigest>>,
-    unspent_outputs: Vec<UnblindedOutput>,
-    spent_outputs: Vec<UnblindedOutput>,
-    pending_transactions: HashMap<u64, PendingTransactionOutputs>,
+    db: OutputManagerDatabase<T>,
     request_stream:
         Option<reply_channel::Receiver<OutputManagerRequest, Result<OutputManagerResponse, OutputManagerError>>>,
 }
 
-impl OutputManagerService {
+impl<T> OutputManagerService<T>
+where T: OutputManagerBackend
+{
     pub fn new(
         request_stream: reply_channel::Receiver<
             OutputManagerRequest,
             Result<OutputManagerResponse, OutputManagerError>,
         >,
-        master_key: PrivateKey,
-        branch_seed: String,
-        primary_key_index: usize,
-    ) -> OutputManagerService
+        config: OutputManagerConfig,
+        db: OutputManagerDatabase<T>,
+    ) -> Result<OutputManagerService<T>, OutputManagerError>
     {
-        OutputManagerService {
+        Ok(OutputManagerService {
             key_manager: Mutex::new(KeyManager::<PrivateKey, KeyDigest>::from(
-                master_key,
-                branch_seed,
-                primary_key_index,
+                config.master_seed,
+                config.branch_seed,
+                config.primary_key_index,
             )),
-            unspent_outputs: Vec::new(),
-            spent_outputs: Vec::new(),
-            pending_transactions: HashMap::new(),
+            db,
             request_stream: Some(request_stream),
-        }
+        })
     }
 
     pub async fn start(mut self) -> Result<(), OutputManagerError> {
@@ -116,12 +122,12 @@ impl OutputManagerService {
     {
         match request {
             OutputManagerRequest::AddOutput(uo) => self.add_output(uo).map(|_| OutputManagerResponse::OutputAdded),
-            OutputManagerRequest::GetBalance => Ok(OutputManagerResponse::Balance(self.get_balance())),
+            OutputManagerRequest::GetBalance => self.get_balance().map(|a| OutputManagerResponse::Balance(a)),
             OutputManagerRequest::GetRecipientKey((tx_id, amount)) => self
                 .get_recipient_spending_key(tx_id, amount)
                 .map(|k| OutputManagerResponse::RecipientKeyGenerated(k)),
-            OutputManagerRequest::PrepareToSendTransaction((amount, fee_per_gram, lock_height)) => self
-                .prepare_transaction_to_send(amount, fee_per_gram, lock_height)
+            OutputManagerRequest::PrepareToSendTransaction((amount, fee_per_gram, lock_height, message)) => self
+                .prepare_transaction_to_send(amount, fee_per_gram, lock_height, message)
                 .map(|stp| OutputManagerResponse::TransactionToSend(stp)),
             OutputManagerRequest::ConfirmReceivedOutput((tx_id, output)) => self
                 .confirm_received_transaction_output(tx_id, &output)
@@ -135,38 +141,32 @@ impl OutputManagerService {
             OutputManagerRequest::TimeoutTransactions(period) => self
                 .timeout_pending_transactions(period)
                 .map(|_| OutputManagerResponse::TransactionsTimedOut),
-            OutputManagerRequest::GetPendingTransactions => Ok(OutputManagerResponse::PendingTransactions(
-                self.get_pending_transactions(),
-            )),
-            OutputManagerRequest::GetSpentOutputs => Ok(OutputManagerResponse::SpentOutputs(self.get_spent_outputs())),
-            OutputManagerRequest::GetUnspentOutputs => {
-                Ok(OutputManagerResponse::UnspentOutputs(self.get_unspent_outputs()))
-            },
+            OutputManagerRequest::GetPendingTransactions => self
+                .fetch_pending_transaction_outputs()
+                .map(|p| OutputManagerResponse::PendingTransactions(p)),
+            OutputManagerRequest::GetSpentOutputs => self
+                .fetch_spent_outputs()
+                .map(|o| OutputManagerResponse::SpentOutputs(o)),
+            OutputManagerRequest::GetUnspentOutputs => self
+                .fetch_unspent_outputs()
+                .map(|o| OutputManagerResponse::UnspentOutputs(o)),
+            OutputManagerRequest::GetSeedWords => self.get_seed_words().map(|sw| OutputManagerResponse::SeedWords(sw)),
         }
     }
 
     /// Add an unblinded output to the unspent outputs list
     pub fn add_output(&mut self, output: UnblindedOutput) -> Result<(), OutputManagerError> {
-        // Check it is not already present in the various output sets
-        if self.contains_output(&output) {
-            return Err(OutputManagerError::DuplicateOutput);
-        }
-
-        self.unspent_outputs.push(output);
-
-        Ok(())
+        Ok(self.db.add_unspent_output(output)?)
     }
 
-    pub fn get_balance(&self) -> MicroTari {
-        self.unspent_outputs
-            .iter()
-            .fold(MicroTari::from(0), |acc, x| acc + x.value)
+    pub fn get_balance(&self) -> Result<Balance, OutputManagerError> {
+        Ok(self.db.get_balance()?)
     }
 
     /// Request a spending key to be used to accept a transaction from a sender.
     pub fn get_recipient_spending_key(
         &mut self,
-        tx_id: u64,
+        tx_id: TxId,
         amount: MicroTari,
     ) -> Result<PrivateKey, OutputManagerError>
     {
@@ -174,7 +174,7 @@ impl OutputManagerService {
 
         let key = km.next_key()?.k;
 
-        self.pending_transactions.insert(tx_id, PendingTransactionOutputs {
+        self.db.add_pending_transaction_outputs(PendingTransactionOutputs {
             tx_id,
             outputs_to_be_spent: Vec::new(),
             outputs_to_be_received: vec![UnblindedOutput {
@@ -183,7 +183,7 @@ impl OutputManagerService {
                 features: OutputFeatures::default(),
             }],
             timestamp: Utc::now().naive_utc(),
-        });
+        })?;
 
         Ok(key)
     }
@@ -196,10 +196,7 @@ impl OutputManagerService {
         received_output: &TransactionOutput,
     ) -> Result<(), OutputManagerError>
     {
-        let pending_transaction = self
-            .pending_transactions
-            .get_mut(&tx_id)
-            .ok_or(OutputManagerError::PendingTransactionNotFound)?;
+        let pending_transaction = self.db.fetch_pending_transaction_outputs(tx_id.clone())?;
 
         // Assumption: We are only allowing a single output per receiver in the current transaction protocols.
         if pending_transaction.outputs_to_be_received.len() != 1 ||
@@ -211,9 +208,9 @@ impl OutputManagerService {
             return Err(OutputManagerError::IncompleteTransaction);
         }
 
-        self.unspent_outputs
-            .append(&mut pending_transaction.outputs_to_be_received);
-        let _ = self.pending_transactions.remove(&tx_id);
+        self.db
+            .confirm_pending_transaction_outputs(pending_transaction.tx_id.clone())?;
+
         Ok(())
     }
 
@@ -224,6 +221,7 @@ impl OutputManagerService {
         amount: MicroTari,
         fee_per_gram: MicroTari,
         lock_height: Option<u64>,
+        message: String,
     ) -> Result<SenderTransactionProtocol, OutputManagerError>
     {
         let mut rng = TransactionRng::new().unwrap();
@@ -239,7 +237,8 @@ impl OutputManagerService {
             .with_fee_per_gram(fee_per_gram)
             .with_offset(offset.clone())
             .with_private_nonce(nonce.clone())
-            .with_amount(0, amount);
+            .with_amount(0, amount)
+            .with_message(message);
 
         for uo in outputs.iter() {
             builder.with_input(
@@ -263,30 +262,19 @@ impl OutputManagerService {
             .build::<HashDigest>(&PROVER, &COMMITMENT_FACTORY)
             .map_err(|e| OutputManagerError::BuildError(e.message))?;
 
-        // The Transaction Protocol built successfully so we will pull the unspent outputs out of the unspent list and
-        // store them until the transaction times out OR is confirmed
-        let outputs_to_be_spent = self
-            .unspent_outputs
-            .drain_filter(|uo| outputs.iter().any(|o| uo.spending_key == o.spending_key))
-            .collect();
-
-        let mut pending_transaction = PendingTransactionOutputs {
-            tx_id: stp.get_tx_id()?,
-            outputs_to_be_spent,
-            outputs_to_be_received: Vec::new(),
-            timestamp: Utc::now().naive_utc(),
-        };
         // If a change output was created add it to the pending_outputs list.
-        if let Some(key) = change_key {
-            pending_transaction.outputs_to_be_received.push(UnblindedOutput {
+        let change_output = match change_key {
+            Some(key) => Some(UnblindedOutput {
                 value: stp.get_amount_to_self()?,
                 spending_key: key,
                 features: OutputFeatures::default(),
-            })
-        }
+            }),
+            None => None,
+        };
 
-        self.pending_transactions
-            .insert(pending_transaction.tx_id, pending_transaction);
+        // The Transaction Protocol built successfully so we will pull the unspent outputs out of the unspent list and
+        // store them until the transaction times out OR is confirmed
+        self.db.encumber_outputs(stp.get_tx_id()?, outputs, change_output)?;
 
         Ok(stp)
     }
@@ -300,10 +288,7 @@ impl OutputManagerService {
         received_outputs: &Vec<TransactionOutput>,
     ) -> Result<(), OutputManagerError>
     {
-        let pending_transaction = self
-            .pending_transactions
-            .get_mut(&tx_id)
-            .ok_or(OutputManagerError::PendingTransactionNotFound)?;
+        let pending_transaction = self.db.fetch_pending_transaction_outputs(tx_id.clone())?;
 
         // Check that the set of TransactionInputs and TransactionOutputs provided contain all the spent and received
         // outputs in the PendingTransaction
@@ -328,41 +313,19 @@ impl OutputManagerService {
             return Err(OutputManagerError::IncompleteTransaction);
         }
 
-        self.unspent_outputs
-            .append(&mut pending_transaction.outputs_to_be_received);
-        self.spent_outputs.append(&mut pending_transaction.outputs_to_be_spent);
-        let _ = self.pending_transactions.remove(&tx_id);
+        self.db.confirm_pending_transaction_outputs(pending_transaction.tx_id)?;
 
         Ok(())
     }
 
     /// Cancel a pending transaction and place the encumbered outputs back into the unspent pool
     pub fn cancel_transaction(&mut self, tx_id: u64) -> Result<(), OutputManagerError> {
-        let pending_transaction = self
-            .pending_transactions
-            .get_mut(&tx_id)
-            .ok_or(OutputManagerError::PendingTransactionNotFound)?;
-
-        self.unspent_outputs
-            .append(&mut pending_transaction.outputs_to_be_spent);
-
-        Ok(())
+        Ok(self.db.cancel_pending_transaction_outputs(tx_id)?)
     }
 
     /// Go through the pending transaction and if any have existed longer than the specified duration, cancel them
     pub fn timeout_pending_transactions(&mut self, period: Duration) -> Result<(), OutputManagerError> {
-        let mut transactions_to_be_cancelled = Vec::new();
-        for (tx_id, pt) in self.pending_transactions.iter() {
-            if pt.timestamp + ChronoDuration::from_std(period)? < Utc::now().naive_utc() {
-                transactions_to_be_cancelled.push(tx_id.clone());
-            }
-        }
-
-        for t in transactions_to_be_cancelled {
-            self.cancel_transaction(t.clone())?
-        }
-
-        Ok(())
+        Ok(self.db.timeout_pending_transaction_outputs(period)?)
     }
 
     /// Select which outputs to use to send a transaction of the specified amount. Use the specified selection strategy
@@ -379,10 +342,11 @@ impl OutputManagerService {
         let mut fee_without_change = MicroTari::from(0);
         let mut fee_with_change = MicroTari::from(0);
 
+        let uo = self.db.fetch_sorted_unspent_outputs()?;
+
         match strategy {
             UTXOSelectionStrategy::Smallest => {
-                self.unspent_outputs.sort();
-                for o in self.unspent_outputs.iter() {
+                for o in uo.iter() {
                     outputs.push(o.clone());
                     total += o.value.clone();
                     // I am assuming that the only output will be the payment output and change if required
@@ -403,43 +367,27 @@ impl OutputManagerService {
         Ok(outputs)
     }
 
-    pub fn get_pending_transactions(&self) -> HashMap<u64, PendingTransactionOutputs> {
-        self.pending_transactions.clone()
+    pub fn fetch_pending_transaction_outputs(
+        &self,
+    ) -> Result<HashMap<u64, PendingTransactionOutputs>, OutputManagerError> {
+        Ok(self.db.fetch_all_pending_transaction_outputs()?)
     }
 
-    pub fn get_spent_outputs(&self) -> Vec<UnblindedOutput> {
-        self.spent_outputs.clone()
+    pub fn fetch_spent_outputs(&self) -> Result<Vec<UnblindedOutput>, OutputManagerError> {
+        Ok(self.db.fetch_spent_outputs()?)
     }
 
-    pub fn get_unspent_outputs(&self) -> Vec<UnblindedOutput> {
-        self.unspent_outputs.clone()
+    pub fn fetch_unspent_outputs(&self) -> Result<Vec<UnblindedOutput>, OutputManagerError> {
+        Ok(self.db.fetch_sorted_unspent_outputs()?)
     }
 
-    /// Utility function to determine if an output exists in the spent, unspent or pending output sets
-    pub fn contains_output(&self, output: &UnblindedOutput) -> bool {
-        self.unspent_outputs
-            .iter()
-            .any(|o| o.value == output.value && o.spending_key == output.spending_key) ||
-            self.spent_outputs
-                .iter()
-                .any(|o| o.value == output.value && o.spending_key == output.spending_key) ||
-            self.pending_transactions.values().fold(false, |acc, pt| {
-                acc || pt
-                    .outputs_to_be_spent
-                    .iter()
-                    .chain(pt.outputs_to_be_received.iter())
-                    .any(|o| o.value == output.value && o.spending_key == output.spending_key)
-            })
+    /// Return the Seed words for the current Master Key set in the Key Manager
+    pub fn get_seed_words(&self) -> Result<Vec<String>, OutputManagerError> {
+        Ok(from_secret_key(
+            &acquire_lock!(self.key_manager).master_key,
+            &MnemonicLanguage::English,
+        )?)
     }
-}
-
-/// Holds the outputs that have been selected for a given pending transaction waiting for confirmation
-#[derive(Clone)]
-pub struct PendingTransactionOutputs {
-    pub tx_id: u64,
-    pub outputs_to_be_spent: Vec<UnblindedOutput>,
-    pub outputs_to_be_received: Vec<UnblindedOutput>,
-    pub timestamp: NaiveDateTime,
 }
 
 /// Different UTXO selection strategies for choosing which UTXO's are used to fulfill a transaction
@@ -450,58 +398,13 @@ pub enum UTXOSelectionStrategy {
     Smallest,
 }
 
-#[cfg(test)]
-mod test {
-    use crate::output_manager_service::service::{OutputManagerService, PendingTransactionOutputs};
-    use chrono::Utc;
-    use rand::{CryptoRng, Rng, RngCore};
-    use tari_core::{
-        tari_amount::MicroTari,
-        transaction::UnblindedOutput,
-        types::{PrivateKey, PublicKey},
-    };
-    use tari_crypto::keys::{PublicKey as PublicKeyTrait, SecretKey};
-    use tari_service_framework::reply_channel;
-
-    fn make_output<R: Rng + CryptoRng>(rng: &mut R, val: MicroTari) -> UnblindedOutput {
-        let key = PrivateKey::random(rng);
-        UnblindedOutput::new(val, key, None)
-    }
-
-    #[test]
-    fn test_contains_output_function() {
-        let mut rng = rand::OsRng::new().unwrap();
-        let (secret_key, _public_key) = PublicKey::random_keypair(&mut rng);
-        let (_sender, receiver) = reply_channel::unbounded();
-        let mut oms = OutputManagerService::new(receiver, secret_key, "".to_string(), 0);
-        let mut balance = MicroTari::from(0);
-        for _i in 0..3 {
-            let uo = make_output(&mut rng.clone(), MicroTari::from(100 + rng.next_u64() % 1000));
-            balance += uo.value.clone();
-            oms.add_output(uo).unwrap();
-        }
-
-        let uo1 = make_output(&mut rng.clone(), MicroTari::from(100 + rng.next_u64() % 1000));
-
-        assert!(!oms.contains_output(&uo1));
-        oms.add_output(uo1.clone()).unwrap();
-        assert!(oms.contains_output(&uo1));
-
-        let uo2 = make_output(&mut rng.clone(), MicroTari::from(100 + rng.next_u64() % 1000));
-        assert!(!oms.contains_output(&uo2));
-        oms.spent_outputs.push(uo2.clone());
-        assert!(oms.contains_output(&uo2));
-
-        let uo3 = make_output(&mut rng.clone(), MicroTari::from(100 + rng.next_u64() % 1000));
-        assert!(!oms.contains_output(&uo3));
-        oms.pending_transactions.insert(1, PendingTransactionOutputs {
-            tx_id: 1,
-            outputs_to_be_received: vec![uo3.clone()],
-            outputs_to_be_spent: Vec::new(),
-            timestamp: Utc::now().naive_utc(),
-        });
-        assert!(oms.contains_output(&uo3));
-
-        assert_eq!(uo1.value + balance, oms.get_balance());
-    }
+/// This struct holds the detailed balance of the Output Manager Service.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Balance {
+    /// The current balance that is available to spend
+    pub available_balance: MicroTari,
+    /// The current balance of funds that are due to be received but have not yet been confirmed
+    pub pending_incoming_balance: MicroTari,
+    /// The current balance of funds encumbered in pending outbound transactions that have not been confirmed
+    pub pending_outgoing_balance: MicroTari,
 }

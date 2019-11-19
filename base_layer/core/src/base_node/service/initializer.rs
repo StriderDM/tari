@@ -22,25 +22,24 @@
 
 use crate::{
     base_node::{
-        comms_interface::{InboundNodeCommsInterface, OutboundNodeCommsInterface},
-        service::{
-            service::{BaseNodeService, BaseNodeServiceConfig},
-            service_request::BaseNodeServiceRequest,
-            service_response::BaseNodeServiceResponse,
-        },
+        comms_interface::{InboundNodeCommsHandlers, LocalNodeCommsInterface, OutboundNodeCommsInterface},
+        proto,
+        service::service::{BaseNodeService, BaseNodeServiceConfig, BaseNodeStreams},
     },
+    blocks::Block,
     chain_storage::{BlockchainBackend, BlockchainDatabase},
+    proto as shared_protos,
 };
 use futures::{future, Future, Stream, StreamExt};
 use log::*;
-use std::sync::Arc;
-use tari_comms::peer_manager::NodeIdentity;
+use std::{convert::TryFrom, sync::Arc};
+use tari_broadcast_channel::bounded;
 use tari_comms_dht::outbound::OutboundMessageRequester;
 use tari_p2p::{
     comms_connector::PeerMessage,
     domain_message::DomainMessage,
-    services::utils::{map_deserialized, ok_or_skip_result},
-    tari_message::{BlockchainMessage, TariMessageType},
+    services::utils::{map_decode, ok_or_skip_result},
+    tari_message::TariMessageType,
 };
 use tari_pubsub::TopicSubscriptionFactory;
 use tari_service_framework::{
@@ -52,16 +51,14 @@ use tari_service_framework::{
 use tari_shutdown::ShutdownSignal;
 use tokio::runtime::TaskExecutor;
 
-const LOG_TARGET: &'static str = "tari_core::base_node::base_node_service";
+const LOG_TARGET: &'static str = "base_node::service::initializer";
 
 /// Initializer for the Base Node service handle and service future.
 pub struct BaseNodeServiceInitializer<T>
 where T: BlockchainBackend
 {
-    inbound_message_subscription_factory:
-        Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage<TariMessageType>>>>,
-    node_identity: Arc<NodeIdentity>,
-    blockchain_db: Arc<BlockchainDatabase<T>>,
+    inbound_message_subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+    blockchain_db: BlockchainDatabase<T>,
     config: BaseNodeServiceConfig,
 }
 
@@ -70,39 +67,71 @@ where T: BlockchainBackend
 {
     /// Create a new BaseNodeServiceInitializer from the inbound message subscriber.
     pub fn new(
-        inbound_message_subscription_factory: Arc<
-            TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage<TariMessageType>>>,
-        >,
-        node_identity: Arc<NodeIdentity>,
-        blockchain_db: Arc<BlockchainDatabase<T>>,
+        inbound_message_subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+        blockchain_db: BlockchainDatabase<T>,
         config: BaseNodeServiceConfig,
     ) -> Self
     {
         Self {
             inbound_message_subscription_factory,
-            node_identity,
             blockchain_db,
             config,
         }
     }
 
     /// Get a stream for inbound Base Node request messages
-    fn inbound_request_stream(&self) -> impl Stream<Item = DomainMessage<BaseNodeServiceRequest>> {
+    fn inbound_request_stream(&self) -> impl Stream<Item = DomainMessage<proto::BaseNodeServiceRequest>> {
         self.inbound_message_subscription_factory
-            .get_subscription(TariMessageType::new(BlockchainMessage::BaseNodeRequest))
-            .map(map_deserialized::<BaseNodeServiceRequest>)
+            .get_subscription(TariMessageType::BaseNodeRequest)
+            .map(map_decode::<proto::BaseNodeServiceRequest>)
             .filter_map(ok_or_skip_result)
     }
 
     /// Get a stream for inbound Base Node response messages
-    fn inbound_response_stream(&self) -> impl Stream<Item = DomainMessage<BaseNodeServiceResponse>> {
+    fn inbound_response_stream(&self) -> impl Stream<Item = DomainMessage<proto::BaseNodeServiceResponse>> {
         self.inbound_message_subscription_factory
-            .get_subscription(TariMessageType::new(BlockchainMessage::BaseNodeResponse))
-            .map(map_deserialized::<BaseNodeServiceResponse>)
+            .get_subscription(TariMessageType::BaseNodeResponse)
+            .map(map_decode::<proto::BaseNodeServiceResponse>)
             .filter_map(ok_or_skip_result)
     }
 
-    // TODO: add streams for broadcasted blocks and transactions
+    /// Create a stream of 'New Block` messages
+    fn inbound_block_stream(&self) -> impl Stream<Item = DomainMessage<Block>> {
+        self.inbound_message_subscription_factory
+            .get_subscription(TariMessageType::NewBlock)
+            .filter_map(extract_block)
+    }
+}
+
+async fn extract_block(msg: Arc<PeerMessage>) -> Option<DomainMessage<Block>> {
+    match msg.decode_message::<shared_protos::core::Block>() {
+        Err(e) => {
+            warn!(
+                target: LOG_TARGET,
+                "Could not decode inbound block message. {}",
+                e.to_string()
+            );
+            None
+        },
+        Ok(block) => {
+            let origin = msg.dht_header.origin_public_key.clone();
+            let block = match Block::try_from(block) {
+                Err(e) => {
+                    warn!(
+                        target: LOG_TARGET,
+                        "Inbound block message from {} was ill-formed. {}", origin, e
+                    );
+                    return None;
+                },
+                Ok(b) => b,
+            };
+            Some(DomainMessage {
+                source_peer: msg.source_peer.clone(),
+                origin_pubkey: origin,
+                inner: block,
+            })
+        },
+    }
 }
 
 impl<T> ServiceInitializer for BaseNodeServiceInitializer<T>
@@ -120,16 +149,27 @@ where T: BlockchainBackend + 'static
         // Create streams for receiving Base Node requests and response messages from comms
         let inbound_request_stream = self.inbound_request_stream();
         let inbound_response_stream = self.inbound_response_stream();
-        let node_identity = self.node_identity.clone();
+        let inbound_block_stream = self.inbound_block_stream();
         // Connect InboundNodeCommsInterface and OutboundNodeCommsInterface to BaseNodeService
         let (outbound_request_sender_service, outbound_request_stream) = reply_channel::unbounded();
-        let outbound_nci = OutboundNodeCommsInterface::new(outbound_request_sender_service);
-        let inbound_nci = Arc::new(InboundNodeCommsInterface::new(self.blockchain_db.clone()));
+        let (outbound_block_sender_service, outbound_block_stream) = reply_channel::unbounded();
+        let (local_request_sender_service, local_request_stream) = reply_channel::unbounded();
+        let (local_block_sender_service, local_block_stream) = reply_channel::unbounded();
+        let outbound_nci =
+            OutboundNodeCommsInterface::new(outbound_request_sender_service, outbound_block_sender_service);
+        let (block_event_publisher, block_event_subscriber) = bounded(100);
+        let local_nci = LocalNodeCommsInterface::new(
+            local_request_sender_service,
+            local_block_sender_service,
+            block_event_subscriber,
+        );
+        let inbound_nch = InboundNodeCommsHandlers::new(block_event_publisher, self.blockchain_db.clone());
         let executer_clone = executor.clone(); // Give BaseNodeService access to the executor
         let config = self.config.clone();
 
         // Register handle to OutboundNodeCommsInterface before waiting for handles to be ready
         handles_fut.register(outbound_nci);
+        handles_fut.register(local_nci);
 
         executor.spawn(async move {
             let handles = handles_fut.await;
@@ -138,17 +178,17 @@ where T: BlockchainBackend + 'static
                 .get_handle::<OutboundMessageRequester>()
                 .expect("OutboundMessageRequester handle required for BaseNodeService");
 
-            let service = BaseNodeService::new(
-                executer_clone,
+            let streams = BaseNodeStreams::new(
                 outbound_request_stream,
+                outbound_block_stream,
                 inbound_request_stream,
                 inbound_response_stream,
-                outbound_message_service,
-                node_identity,
-                inbound_nci,
-                config,
-            )
-            .start();
+                inbound_block_stream,
+                local_request_stream,
+                local_block_stream,
+            );
+            let service =
+                BaseNodeService::new(executer_clone, outbound_message_service, inbound_nch, config).start(streams);
             futures::pin_mut!(service);
             future::select(service, shutdown).await;
             info!(target: LOG_TARGET, "Base Node Service shutdown");

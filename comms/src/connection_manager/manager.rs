@@ -31,7 +31,7 @@ use super::{
 };
 use crate::{
     connection::{ConnectionError, CurveEncryption, CurvePublicKey, PeerConnection, PeerConnectionState, ZmqContext},
-    connection_manager::dialer::Dialer,
+    connection_manager::{dialer::Dialer, Connectivity},
     control_service::messages::RejectReason,
     message::FrameSet,
     peer_manager::{NodeId, NodeIdentity, Peer, PeerManager},
@@ -85,16 +85,10 @@ impl ConnectionManager {
     /// Attempt to establish a connection to a given NodeId. If the connection exists
     /// the existing connection is returned.
     pub fn establish_connection_to_node_id(&self, node_id: &NodeId) -> Result<Arc<PeerConnection>> {
-        match self.peer_manager.find_with_node_id(node_id) {
-            Ok(peer) => self.establish_connection_to_peer(&peer),
+        match self.peer_manager.find_by_node_id(node_id) {
+            Ok(peer) => self.with_establish_lock(node_id, || self.attempt_connection_to_peer(&peer)),
             Err(err) => Err(ConnectionManagerError::PeerManagerError(err)),
         }
-    }
-
-    /// Attempt to establish a connection to a given peer. If the connection exists
-    /// the existing connection is returned.
-    pub fn establish_connection_to_peer(&self, peer: &Peer) -> Result<Arc<PeerConnection>> {
-        self.with_establish_lock(&peer.node_id, || self.attempt_connection_to_peer(peer))
     }
 
     fn attempt_connection_to_peer(&self, peer: &Peer) -> Result<Arc<PeerConnection>> {
@@ -257,8 +251,8 @@ impl ConnectionManager {
     /// otherwise None is returned.
     ///
     /// [PeerConnection]: ../../connection/peer_connection/index.html
-    pub fn disconnect_peer(&self, peer: &Peer) -> Result<Option<Arc<PeerConnection>>> {
-        match self.connections.shutdown_connection(&peer.node_id) {
+    pub fn disconnect_peer(&self, node_id: &NodeId) -> Result<Option<Arc<PeerConnection>>> {
+        match self.connections.shutdown_connection(&node_id) {
             Ok((conn, handle)) => {
                 handle
                     .timeout_join(Duration::from_millis(3000))
@@ -277,7 +271,12 @@ impl ConnectionManager {
 
     /// Return a connection for a peer if one exists, otherwise None is returned
     pub(crate) fn get_connection(&self, peer: &Peer) -> Option<Arc<PeerConnection>> {
-        self.connections.get_connection(&peer.node_id)
+        self.get_connection_by_node_id(&peer.node_id)
+    }
+
+    /// Return a connection for a node id if one exists, otherwise None is returned
+    pub(crate) fn get_connection_by_node_id(&self, node_id: &NodeId) -> Option<Arc<PeerConnection>> {
+        self.connections.get_connection(&node_id)
     }
 
     /// Return the number of _active_ peer connections currently managed by this instance
@@ -286,6 +285,11 @@ impl ConnectionManager {
     }
 
     fn initiate_peer_connection(&self, peer: &Peer) -> Result<Arc<PeerConnection>> {
+        debug!(
+            target: LOG_TARGET,
+            "Initiating connection to peer. NodeId={}, connection_stats={:?}", peer.node_id, peer.connection_stats
+        );
+
         let protocol = PeerConnectionProtocol::new(&self.node_identity, &self.establisher);
         self.peer_manager
             .reset_connection_attempts(&peer.node_id)
@@ -376,22 +380,6 @@ impl From<Arc<ConnectionManager>> for ConnectionManagerDialer {
     }
 }
 
-impl Dialer<Peer> for ConnectionManagerDialer {
-    type Error = ConnectionManagerError;
-    type Output = Arc<PeerConnection>;
-
-    type Future = impl Future<Output = Result<Self::Output>>;
-
-    fn dial(&self, peer: &Peer) -> Self::Future {
-        let inner = Arc::clone(&self.inner);
-        let peer = peer.clone();
-        blocking::run(move || {
-            // TODO: This is synchronous until we can make connection manager fully async
-            inner.establish_connection_to_peer(&peer)
-        })
-    }
-}
-
 impl Dialer<NodeId> for ConnectionManagerDialer {
     type Error = ConnectionManagerError;
     type Output = Arc<PeerConnection>;
@@ -405,6 +393,32 @@ impl Dialer<NodeId> for ConnectionManagerDialer {
             // TODO: This is synchronous until we can make connection manager fully async
             inner.establish_connection_to_node_id(&node_id)
         })
+    }
+}
+
+impl Connectivity for ConnectionManagerDialer {
+    fn get_connection(&self, node_id: &NodeId) -> Option<Arc<PeerConnection>> {
+        self.inner.get_connection_by_node_id(node_id)
+    }
+
+    fn get_active_connection_count(&self) -> usize {
+        self.inner.get_active_connection_count()
+    }
+
+    fn disconnect_peer(&self, node_id: &NodeId) -> Result<Option<Arc<PeerConnection>>> {
+        self.inner.disconnect_peer(node_id)
+    }
+
+    fn set_last_connection_failed(&self, node_id: &NodeId) -> Result<()> {
+        self.inner.peer_manager().set_failed_connection_state(&node_id)?;
+        debug!(target: LOG_TARGET, "Set failed connection state for node {}", node_id);
+        Ok(())
+    }
+
+    fn set_last_connection_succeeded(&self, node_id: &NodeId) -> Result<()> {
+        self.inner.peer_manager().set_success_connection_state(&node_id)?;
+        debug!(target: LOG_TARGET, "Set success connection state for node {}", node_id);
+        Ok(())
     }
 }
 
@@ -424,7 +438,7 @@ mod test {
 
     fn setup() -> (ZmqContext, Arc<NodeIdentity>, Arc<PeerManager>, Sender<FrameSet>) {
         let context = ZmqContext::new();
-        let node_identity = Arc::new(NodeIdentity::random_for_test(None, PeerFeatures::default()));
+        let node_identity = Arc::new(NodeIdentity::random_for_test(None, PeerFeatures::empty()));
         let peer_manager = Arc::new(PeerManager::new(HMapDatabase::new()).unwrap());
         let (tx, _rx) = channel(10);
         (context, node_identity, peer_manager, tx)
@@ -481,7 +495,7 @@ mod test {
         let address = "127.0.0.1:43456".parse::<NetAddress>().unwrap();
         let peer = create_peer(address.clone());
 
-        assert!(manager.disconnect_peer(&peer).unwrap().is_none());
+        assert!(manager.disconnect_peer(&peer.node_id).unwrap().is_none());
 
         let (peer_conn, rx) = PeerConnection::new_with_connecting_state_for_test();
         let peer_conn = Arc::new(peer_conn);
@@ -491,7 +505,7 @@ mod test {
             .add_connection(peer.node_id.clone(), peer_conn, join_handle)
             .unwrap();
 
-        match manager.disconnect_peer(&peer).unwrap() {
+        match manager.disconnect_peer(&peer.node_id).unwrap() {
             Some(_) => {},
             None => panic!("disconnect_peer did not return active peer connection"),
         }

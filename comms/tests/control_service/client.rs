@@ -24,7 +24,7 @@ use crate::support::factories::{self, TestFactory};
 use std::{sync::Arc, time::Duration};
 use tari_comms::{
     connection::{Connection, Direction, InprocAddress, ZmqContext},
-    control_service::{messages::Ping, ControlServiceClient},
+    control_service::{messages::PingMessage, ControlServiceClient},
 };
 
 #[test]
@@ -44,16 +44,16 @@ fn send_ping_recv_pong() {
 
     let out_client = ControlServiceClient::new(
         node_identity_1.clone(),
-        node_identity_2.identity.public_key.clone(),
+        node_identity_2.public_key().clone(),
         outbound_conn,
     );
     out_client.send_ping().unwrap();
 
     let in_client = ControlServiceClient::new(
         node_identity_2.clone(),
-        node_identity_1.identity.public_key.clone(),
+        node_identity_1.public_key().clone(),
         inbound_conn,
     );
 
-    let _msg: Ping = in_client.receive_message(Duration::from_millis(2000)).unwrap().unwrap();
+    let _msg: PingMessage = in_client.receive_message(Duration::from_millis(2000)).unwrap().unwrap();
 }

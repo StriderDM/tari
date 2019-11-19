@@ -20,7 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::support::{comms_and_services::setup_comms_services, utils::event_stream_count};
+use crate::support::comms_and_services::setup_comms_services;
 use std::{sync::Arc, time::Duration};
 use tari_comms::{
     builder::CommsNode,
@@ -33,11 +33,13 @@ use tari_p2p::{
         comms_outbound::CommsOutboundServiceInitializer,
         liveness::{
             handle::{LivenessEvent, LivenessHandle},
+            LivenessConfig,
             LivenessInitializer,
         },
     },
 };
 use tari_service_framework::StackBuilder;
+use tari_test_utils::collect_stream;
 use tokio::runtime::Runtime;
 
 pub fn setup_liveness_service(
@@ -52,7 +54,15 @@ pub fn setup_liveness_service(
 
     let fut = StackBuilder::new(runtime.executor(), comms.shutdown_signal())
         .add_initializer(CommsOutboundServiceInitializer::new(dht.outbound_requester()))
-        .add_initializer(LivenessInitializer::new(Arc::clone(&subscription_factory)))
+        .add_initializer(LivenessInitializer::new(
+            LivenessConfig {
+                enable_auto_join: false,
+                enable_auto_stored_message_request: false,
+                auto_ping_interval: None,
+            },
+            Arc::clone(&subscription_factory),
+            dht.dht_requester(),
+        ))
         .finish();
 
     let handles = runtime.block_on(fut).expect("Service initialization failed");
@@ -71,13 +81,13 @@ fn end_to_end() {
     let node_1_identity = NodeIdentity::random(
         &mut rng,
         "127.0.0.1:31593".parse().unwrap(),
-        PeerFeatures::communication_node_default(),
+        PeerFeatures::COMMUNICATION_NODE,
     )
     .unwrap();
     let node_2_identity = NodeIdentity::random(
         &mut rng,
         "127.0.0.1:31195".parse().unwrap(),
-        PeerFeatures::communication_node_default(),
+        PeerFeatures::COMMUNICATION_NODE,
     )
     .unwrap();
 
@@ -91,7 +101,7 @@ fn end_to_end() {
 
     for _ in 0..5 {
         let _ = runtime
-            .block_on(liveness2.send_ping(node_1_identity.identity.public_key.clone()))
+            .block_on(liveness2.send_ping(node_1_identity.node_id().clone()))
             .unwrap();
         pingpong1_total = (pingpong1_total.0 + 1, pingpong1_total.1);
         pingpong2_total = (pingpong2_total.0, pingpong2_total.1 + 1);
@@ -99,7 +109,7 @@ fn end_to_end() {
 
     for _ in 0..4 {
         let _ = runtime
-            .block_on(liveness1.send_ping(node_2_identity.identity.public_key.clone()))
+            .block_on(liveness1.send_ping(node_2_identity.node_id().clone()))
             .unwrap();
         pingpong2_total = (pingpong2_total.0 + 1, pingpong2_total.1);
         pingpong1_total = (pingpong1_total.0, pingpong1_total.1 + 1);
@@ -107,7 +117,7 @@ fn end_to_end() {
 
     for _ in 0..5 {
         let _ = runtime
-            .block_on(liveness2.send_ping(node_1_identity.identity.public_key.clone()))
+            .block_on(liveness2.send_ping(node_1_identity.node_id().clone()))
             .unwrap();
         pingpong1_total = (pingpong1_total.0 + 1, pingpong1_total.1);
         pingpong2_total = (pingpong2_total.0, pingpong2_total.1 + 1);
@@ -115,21 +125,65 @@ fn end_to_end() {
 
     for _ in 0..4 {
         let _ = runtime
-            .block_on(liveness1.send_ping(node_2_identity.identity.public_key.clone()))
+            .block_on(liveness1.send_ping(node_2_identity.node_id().clone()))
             .unwrap();
         pingpong2_total = (pingpong2_total.0 + 1, pingpong2_total.1);
         pingpong1_total = (pingpong1_total.0, pingpong1_total.1 + 1);
     }
 
-    let mut result = runtime
-        .block_on(async { event_stream_count(liveness1.get_event_stream_fused(), 18, Duration::from_secs(10)).await });
-    assert_eq!(result.remove(&LivenessEvent::ReceivedPong), Some(8));
-    assert_eq!(result.remove(&LivenessEvent::ReceivedPing), Some(10));
+    let events = collect_stream!(
+        runtime,
+        liveness1.get_event_stream_fused(),
+        take = 18,
+        timeout = Duration::from_secs(10),
+    );
 
-    let mut result = runtime
-        .block_on(async { event_stream_count(liveness2.get_event_stream_fused(), 18, Duration::from_secs(10)).await });
-    assert_eq!(result.remove(&LivenessEvent::ReceivedPong), Some(10));
-    assert_eq!(result.remove(&LivenessEvent::ReceivedPing), Some(8));
+    let ping_count = events
+        .iter()
+        .filter(|event| match ***event {
+            LivenessEvent::ReceivedPing => true,
+            _ => false,
+        })
+        .count();
+
+    assert_eq!(ping_count, 10);
+
+    let pong_count = events
+        .iter()
+        .filter(|event| match ***event {
+            LivenessEvent::ReceivedPong(_) => true,
+            _ => false,
+        })
+        .count();
+
+    assert_eq!(pong_count, 8);
+
+    let events = collect_stream!(
+        runtime,
+        liveness2.get_event_stream_fused(),
+        take = 18,
+        timeout = Duration::from_secs(10),
+    );
+
+    let ping_count = events
+        .iter()
+        .filter(|event| match ***event {
+            LivenessEvent::ReceivedPing => true,
+            _ => false,
+        })
+        .count();
+
+    assert_eq!(ping_count, 8);
+
+    let pong_count = events
+        .iter()
+        .filter(|event| match ***event {
+            LivenessEvent::ReceivedPong(_) => true,
+            _ => false,
+        })
+        .count();
+
+    assert_eq!(pong_count, 10);
 
     let pingcount1 = runtime.block_on(liveness1.get_ping_count()).unwrap();
     let pongcount1 = runtime.block_on(liveness1.get_pong_count()).unwrap();

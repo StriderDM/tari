@@ -8,15 +8,15 @@ tari_broadcast_channel = { version="^0.0",  path = "../../infrastructure/broadca
 tari_comms = { path = "../../comms", version = "^0.0"}
 tari_comms_dht = { path = "../../comms/dht", version = "^0.0"}
 tari_comms_middleware = { path = "../../comms/middleware", version = "^0.0"}
-tari_core = { path = "../core", version="^0.0"}
 tari_crypto = { path = "../../infrastructure/crypto", version = "^0.0" }
-tari_key_manager = {path = "../keymanager", version = "^0.0"}
+tari_key_manager = {path = "../key_manager", version = "^0.0"}
 tari_p2p = {path = "../p2p", version = "^0.0"}
 tari_pubsub = {path = "../../infrastructure/pubsub", version = "^0.0"}
 tari_service_framework = { version = "^0.0", path = "../service_framework"}
-tari_storage = { version = "^0.0", path = "../../infrastructure/storage"}
-tari_utilities = { path = "../../infrastructure/tari_util", version = "^0.0"}
 tari_shutdown = { path = "../../infrastructure/shutdown", version = "^0.0"}
+tari_storage = { version = "^0.0", path = "../../infrastructure/storage"}
+tari_transactions = { path = "../transactions", version="^0.0"}
+tari_utilities = { path = "../../infrastructure/tari_util", version = "^0.0"}
 
 chrono = { version = "0.4.6", features = ["serde"]}
 time = {version = "0.1.39"}
@@ -34,8 +34,13 @@ futures =  { version = "=0.3.0-alpha.19", package = "futures-preview", features 
 tokio = "0.2.0-alpha.4"
 tower = "0.3.0-alpha.2"
 tokio-executor = { version ="^0.2.0-alpha.6", features = ["threadpool"] }
+tempdir = "0.3.7"
 libc = "0.2.65"
 
 [dev-dependencies]
 env_logger = "0.6.2"
-tempdir = "0.3.7"
+prost = "0.5.0"
+
+[features]
+test_harness = []
+c_integration = []

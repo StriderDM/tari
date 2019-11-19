@@ -20,9 +20,9 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{comms_connector::PeerMessage, domain_message::DomainMessage, tari_message::TariMessageType};
+use crate::{comms_connector::PeerMessage, domain_message::DomainMessage};
+use log::*;
 use std::{fmt::Debug, sync::Arc};
-use tari_utilities::message_format::{MessageFormat, MessageFormatError};
 
 const LOG_TARGET: &'static str = "base_layer::p2p::services";
 
@@ -32,21 +32,18 @@ where E: Debug {
     match res {
         Ok(t) => Some(t),
         Err(err) => {
-            tracing::error!(target: LOG_TARGET, "{:?}", err);
+            error!(target: LOG_TARGET, "{:?}", err);
             None
         },
     }
 }
 
-pub fn map_deserialized<T>(
-    serialized: Arc<PeerMessage<TariMessageType>>,
-) -> Result<DomainMessage<T>, MessageFormatError>
-where T: MessageFormat {
+pub fn map_decode<T>(serialized: Arc<PeerMessage>) -> Result<DomainMessage<T>, prost::DecodeError>
+where T: prost::Message + Default {
     Ok(DomainMessage {
         source_peer: serialized.source_peer.clone(),
-        // TODO: origin_pubkey should be used when the DHT middleware is hooked up
-        origin_pubkey: serialized.comms_header.message_public_key.clone(),
-        inner: serialized.deserialize_message()?,
+        origin_pubkey: serialized.dht_header.origin_public_key.clone(),
+        inner: serialized.decode_message()?,
     })
 }
 

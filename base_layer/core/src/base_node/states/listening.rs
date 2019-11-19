@@ -20,32 +20,45 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::base_node::states::{block_sync::BlockSync, InitialSync, StateEvent, StateEvent::FatalError};
+use crate::{
+    base_node::{
+        states::{StateEvent, StateEvent::UserQuit},
+        BaseNodeStateMachine,
+    },
+    blocks::Block,
+    chain_storage::{BlockchainBackend, ChainMetadata},
+};
 use log::*;
+use std::sync::atomic::Ordering;
+use tari_transactions::transaction::Transaction;
 
 const LOG_TARGET: &str = "base_node::listening";
 
-pub struct Listening;
+pub struct ListeningInfo;
 
-impl Listening {
-    pub async fn next_event(&mut self) -> StateEvent {
-        info!(target: LOG_TARGET, "Listening for new blocks");
-        FatalError("Unimplemented".into())
-    }
+enum ChainMessage {
+    Transaction(Box<Transaction>),
+    Block(Box<Block>),
+    Metadata(Box<ChainMetadata>),
 }
 
-/// State management for BlockSync -> Listening. This change is part of the typical flow for new nodes joining the
-/// network, or established nodes that have caught up to the chain tip again.
-impl From<BlockSync> for Listening {
-    fn from(_old: BlockSync) -> Self {
-        unimplemented!()
+impl ListeningInfo {
+    pub async fn next_event<B: BlockchainBackend>(&mut self, shared: &mut BaseNodeStateMachine<B>) -> StateEvent {
+        info!(target: LOG_TARGET, "Listening for new blocks and transactions");
+        loop {
+            let message = self.wait_for_next_message().await;
+            match message {
+                ChainMessage::Transaction(_) => {},
+                ChainMessage::Block(_) => {},
+                ChainMessage::Metadata(_) => {},
+            }
+            if shared.user_stopped.load(Ordering::Relaxed) {
+                return UserQuit;
+            }
+        }
     }
-}
 
-/// State management for BlockSync -> Listening. This state change happens when a node restarts and still happens to
-/// be in sync with the network.
-impl From<InitialSync> for Listening {
-    fn from(_old: InitialSync) -> Self {
+    async fn wait_for_next_message(&self) -> ChainMessage {
         unimplemented!()
     }
 }

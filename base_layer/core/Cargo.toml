@@ -10,6 +10,7 @@ version = "0.0.5"
 edition = "2018"
 
 [dependencies]
+tari_transactions = { path = "../../base_layer/transactions", version = "^0.0" }
 tari_comms = { version = "^0.0", path = "../../comms"}
 tari_utilities = { path = "../../infrastructure/tari_util", version = "^0.0", features = ["chrono_dt"]}
 tari_infra_derive = { path = "../../infrastructure/derive", version = "^0.0" }
@@ -23,6 +24,7 @@ tari_comms_dht = { version = "^0.0", path = "../../comms/dht"}
 tari_broadcast_channel = { version="^0.0",  path = "../../infrastructure/broadcast_channel" }
 tari_pubsub = { version = "^0.0", path = "../../infrastructure/pubsub"}
 tari_shutdown = { path = "../../infrastructure/shutdown", version = "^0.0"}
+
 bitflags = "1.0.4"
 chrono = { version = "0.4.6", features = ["serde"]}
 digest = "0.8.0"
@@ -47,8 +49,14 @@ futures-preview = {version = "0.3.0-alpha.19", features = ["async-await"] }
 lmdb-zero = "0.4.4"
 tower-service = { version="0.3.0-alpha.2" }
 crossbeam-channel = "0.3.8"
+prost = "0.5.0"
+bytes = "0.4.12"
+prost-types = "0.5.0"
 
 [dev-dependencies]
 env_logger = "0.7.0"
 tari_test_utils = { path = "../../infrastructure/test_utils", version = "^0.0" }
 tempdir = "0.3.7"
+
+[build-dependencies]
+tari_protobuf_build = { version = "^0.0", path="../../infrastructure/protobuf_build"}

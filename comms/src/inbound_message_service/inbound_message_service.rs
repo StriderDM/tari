@@ -20,16 +20,19 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 use crate::{
-    inbound_message_service::{error::InboundMessagePipelineError, MessageCache, MessageCacheConfig},
-    message::{Frame, FrameSet, InboundMessage, MessageData},
+    inbound_message_service::error::InboundMessageServiceError,
+    message::{Envelope, FrameSet, InboundMessage, MessageError},
     peer_manager::{NodeId, Peer, PeerManager},
 };
 use futures::{channel::mpsc, FutureExt, Sink, SinkExt, Stream, StreamExt};
 use log::*;
-use std::{convert::TryFrom, sync::Arc};
+use prost::Message;
+use std::{convert::TryInto, sync::Arc};
 use tari_shutdown::ShutdownSignal;
 
 const LOG_TARGET: &str = "comms::inbound_message_service";
+
+const EXPECTED_MESSAGE_FRAME_LEN: usize = 2;
 
 pub type InboundMessageService<TSink> = InnerInboundMessageService<mpsc::Receiver<FrameSet>, TSink>;
 
@@ -39,7 +42,6 @@ pub type InboundMessageService<TSink> = InnerInboundMessageService<mpsc::Receive
 /// the given message_sink.
 pub struct InnerInboundMessageService<TStream, TSink> {
     raw_message_stream: Option<TStream>,
-    message_cache: MessageCache<Frame>,
     message_sink: TSink,
     peer_manager: Arc<PeerManager>,
     shutdown_signal: Option<ShutdownSignal>,
@@ -49,7 +51,7 @@ impl<TStream, TSink> InnerInboundMessageService<TStream, TSink>
 where
     TStream: Stream<Item = FrameSet> + Unpin,
     TSink: Sink<InboundMessage> + Unpin,
-    TSink::Error: Into<InboundMessagePipelineError>,
+    TSink::Error: Into<InboundMessageServiceError>,
 {
     pub fn new(
         raw_message_stream: TStream,
@@ -58,11 +60,9 @@ where
         shutdown_signal: ShutdownSignal,
     ) -> Self
     {
-        let message_cache = MessageCache::new(MessageCacheConfig::default());
         Self {
             raw_message_stream: Some(raw_message_stream),
             message_sink,
-            message_cache,
             peer_manager,
             shutdown_signal: Some(shutdown_signal),
         }
@@ -71,7 +71,7 @@ where
     /// Run the Inbound Message Service on the set `message_sink_receiver` processing each message in that stream. If
     /// an error occurs while processing a message it is logged and the service will move onto the next message. Most
     /// errors represent a reason why a message didn't make it through the pipeline.
-    pub async fn run(mut self) -> () {
+    pub async fn run(mut self) {
         let mut shutdown_signal = self
             .shutdown_signal
             .take()
@@ -102,59 +102,54 @@ where
     }
 
     /// Process a single received message from its raw serialized form i.e. a FrameSet
-    pub async fn process_message(&mut self, frame_set: FrameSet) -> Result<(), InboundMessagePipelineError> {
-        let message_data =
-            MessageData::try_from(frame_set).map_err(|_| InboundMessagePipelineError::DeserializationError)?;
-
-        let message_envelope_header = message_data
-            .message_envelope
-            .deserialize_header()
-            .map_err(|_| InboundMessagePipelineError::DeserializationError)?;
-
-        if !message_envelope_header.verify_signature(message_data.message_envelope.body_frame())? {
-            return Err(InboundMessagePipelineError::InvalidMessageSignature);
+    pub async fn process_message(&mut self, mut frames: FrameSet) -> Result<(), InboundMessageServiceError> {
+        if frames.len() < EXPECTED_MESSAGE_FRAME_LEN {
+            return Err(InboundMessageServiceError::MessageError(
+                MessageError::InvalidMultipartMessageLength,
+            ));
         }
 
-        self.message_cache_check(&message_envelope_header.message_signature)?;
+        let source_node_id: NodeId = frames.remove(0).try_into()?;
+        let envelope = Envelope::decode(&frames.remove(0))?;
 
-        let peer = self.find_known_peer(&message_data.source_node_id)?;
+        if !envelope.is_valid() {
+            return Err(InboundMessageServiceError::InvalidEnvelope);
+        }
 
-        // Message is deduped and authenticated
-
-        let inbound_message = InboundMessage::new(
-            peer,
-            message_envelope_header,
-            message_data.message_envelope.version(),
-            message_data.message_envelope.into_body_frame(),
+        trace!(
+            target: LOG_TARGET,
+            "Received message envelope version {} from NodeId={}",
+            envelope.version,
+            source_node_id
         );
+
+        if !envelope.verify_signature()? {
+            return Err(InboundMessageServiceError::InvalidMessageSignature);
+        }
+
+        let peer = self.find_known_peer(&source_node_id)?;
+
+        let public_key = envelope.get_comms_public_key().expect("already checked");
+
+        if peer.public_key != public_key {
+            return Err(InboundMessageServiceError::PeerPublicKeyMismatch);
+        }
+
+        // -- Message is authenticated --
+
+        let Envelope { header, body, .. } = envelope;
+
+        let inbound_message = InboundMessage::new(peer, header.expect("already checked").try_into().expect(""), body);
 
         self.message_sink.send(inbound_message).await.map_err(Into::into)?;
 
         Ok(())
     }
 
-    /// Utility Functions that require the Pipeline context resources
-    /// Check whether this message body has been received before (within the cache TTL period). If it has then reject
-    /// the message, else add it to the cache.
-    fn message_cache_check(&mut self, signature: &Vec<u8>) -> Result<(), InboundMessagePipelineError> {
-        if !self.message_cache.contains(signature) {
-            if let Err(_e) = self.message_cache.insert(signature.clone()) {
-                error!(
-                    target: LOG_TARGET,
-                    "Duplicate message found in Message Cache AFTER checking the cache for the message"
-                );
-                return Err(InboundMessagePipelineError::DuplicateMessageDiscarded);
-            }
-            return Ok(());
-        } else {
-            return Err(InboundMessagePipelineError::DuplicateMessageDiscarded);
-        }
-    }
-
     /// Check whether the the source of the message is known to our Peer Manager, if it is return the peer but otherwise
     /// we discard the message as it should be in our Peer Manager
-    fn find_known_peer(&self, source_node_id: &NodeId) -> Result<Peer, InboundMessagePipelineError> {
-        match self.peer_manager.find_with_node_id(&source_node_id).ok() {
+    fn find_known_peer(&self, source_node_id: &NodeId) -> Result<Peer, InboundMessageServiceError> {
+        match self.peer_manager.find_by_node_id(source_node_id).ok() {
             Some(peer) => Ok(peer),
             None => {
                 warn!(
@@ -162,7 +157,7 @@ where
                     "Received unknown node id from peer connection. Discarding message from NodeId={:?}",
                     source_node_id
                 );
-                Err(InboundMessagePipelineError::CannotFindSourcePeer)
+                Err(InboundMessageServiceError::CannotFindSourcePeer)
             },
         }
     }

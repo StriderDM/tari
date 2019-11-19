@@ -5,10 +5,17 @@
 #[macro_use]
 mod macros;
 pub mod ffi;
+pub mod contacts_service;
+pub mod error;
 pub mod output_manager_service;
+pub mod storage;
 pub mod transaction_service;
 pub mod types;
 pub mod wallet;
+
+#[cfg(feature = "test_harness")]
+pub mod testnet_utils;
+
 pub use wallet::Wallet;
 
 // TODO: Put back after MVP

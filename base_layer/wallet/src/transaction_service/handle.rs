@@ -20,18 +20,18 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::transaction_service::error::TransactionServiceError;
+#[cfg(feature = "test_harness")]
+use crate::output_manager_service::TxId;
+use crate::transaction_service::{
+    error::TransactionServiceError,
+    storage::database::{CompletedTransaction, InboundTransaction, OutboundTransaction},
+};
 use futures::{stream::Fuse, StreamExt};
 use std::collections::HashMap;
 use tari_broadcast_channel::Subscriber;
 use tari_comms::types::CommsPublicKey;
-use tari_core::{
-    tari_amount::MicroTari,
-    transaction::Transaction,
-    ReceiverTransactionProtocol,
-    SenderTransactionProtocol,
-};
 use tari_service_framework::reply_channel::SenderService;
+use tari_transactions::tari_amount::MicroTari;
 use tower::Service;
 
 /// API Request enum
@@ -40,16 +40,42 @@ pub enum TransactionServiceRequest {
     GetPendingInboundTransactions,
     GetPendingOutboundTransactions,
     GetCompletedTransactions,
-    SendTransaction((CommsPublicKey, MicroTari, MicroTari)),
+    SendTransaction((CommsPublicKey, MicroTari, MicroTari, String)),
+    #[cfg(feature = "c_integration")]
+    RegisterCallbackReceivedTransaction((unsafe extern "C" fn(*mut InboundTransaction))),
+    #[cfg(feature = "c_integration")]
+    RegisterCallbackReceivedTransactionReply((unsafe extern "C" fn(*mut CompletedTransaction))),
+    #[cfg(feature = "c_integration")]
+    RegisterCallbackMined((unsafe extern "C" fn(*mut CompletedTransaction))),
+    #[cfg(feature = "c_integration")]
+    RegisterCallbackTransactionBroadcast((unsafe extern "C" fn(*mut CompletedTransaction))),
+    #[cfg(feature = "test_harness")]
+    CompletePendingOutboundTransaction(CompletedTransaction),
+    #[cfg(feature = "test_harness")]
+    AcceptTestTransaction((TxId, MicroTari, CommsPublicKey)),
+    #[cfg(feature = "test_harness")]
+    MineTransaction(TxId),
+    #[cfg(feature = "test_harness")]
+    BroadcastTransaction(TxId),
 }
 
 /// API Response enum
 #[derive(Debug)]
 pub enum TransactionServiceResponse {
     TransactionSent,
-    PendingInboundTransactions(HashMap<u64, ReceiverTransactionProtocol>),
-    PendingOutboundTransactions(HashMap<u64, SenderTransactionProtocol>),
-    CompletedTransactions(HashMap<u64, Transaction>),
+    PendingInboundTransactions(HashMap<u64, InboundTransaction>),
+    PendingOutboundTransactions(HashMap<u64, OutboundTransaction>),
+    CompletedTransactions(HashMap<u64, CompletedTransaction>),
+    #[cfg(feature = "c_integration")]
+    CallbackRegistered,
+    #[cfg(feature = "test_harness")]
+    CompletedPendingTransaction,
+    #[cfg(feature = "test_harness")]
+    AcceptedTestTransaction,
+    #[cfg(feature = "test_harness")]
+    TransactionMined,
+    #[cfg(feature = "test_harness")]
+    TransactionBroadcast,
 }
 
 /// Events that can be published on the Text Message Service Event Stream
@@ -84,6 +110,7 @@ impl TransactionServiceHandle {
         dest_pubkey: CommsPublicKey,
         amount: MicroTari,
         fee_per_gram: MicroTari,
+        message: String,
     ) -> Result<(), TransactionServiceError>
     {
         match self
@@ -92,6 +119,7 @@ impl TransactionServiceHandle {
                 dest_pubkey,
                 amount,
                 fee_per_gram,
+                message,
             )))
             .await??
         {
@@ -102,7 +130,7 @@ impl TransactionServiceHandle {
 
     pub async fn get_pending_inbound_transactions(
         &mut self,
-    ) -> Result<HashMap<u64, ReceiverTransactionProtocol>, TransactionServiceError> {
+    ) -> Result<HashMap<u64, InboundTransaction>, TransactionServiceError> {
         match self
             .handle
             .call(TransactionServiceRequest::GetPendingInboundTransactions)
@@ -115,7 +143,7 @@ impl TransactionServiceHandle {
 
     pub async fn get_pending_outbound_transactions(
         &mut self,
-    ) -> Result<HashMap<u64, SenderTransactionProtocol>, TransactionServiceError> {
+    ) -> Result<HashMap<u64, OutboundTransaction>, TransactionServiceError> {
         match self
             .handle
             .call(TransactionServiceRequest::GetPendingOutboundTransactions)
@@ -126,13 +154,149 @@ impl TransactionServiceHandle {
         }
     }
 
-    pub async fn get_completed_transactions(&mut self) -> Result<HashMap<u64, Transaction>, TransactionServiceError> {
+    pub async fn get_completed_transactions(
+        &mut self,
+    ) -> Result<HashMap<u64, CompletedTransaction>, TransactionServiceError> {
         match self
             .handle
             .call(TransactionServiceRequest::GetCompletedTransactions)
             .await??
         {
             TransactionServiceResponse::CompletedTransactions(c) => Ok(c),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    #[cfg(feature = "c_integration")]
+    pub async fn register_callback_received_transaction(
+        &mut self,
+        call: unsafe extern "C" fn(*mut InboundTransaction),
+    ) -> Result<(), TransactionServiceError>
+    {
+        match self
+            .handle
+            .call(TransactionServiceRequest::RegisterCallbackReceivedTransaction(call))
+            .await??
+        {
+            TransactionServiceResponse::CallbackRegistered => Ok(()),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    #[cfg(feature = "c_integration")]
+    pub async fn register_callback_received_transaction_reply(
+        &mut self,
+        call: unsafe extern "C" fn(*mut CompletedTransaction),
+    ) -> Result<(), TransactionServiceError>
+    {
+        match self
+            .handle
+            .call(TransactionServiceRequest::RegisterCallbackReceivedTransactionReply(
+                call,
+            ))
+            .await??
+        {
+            TransactionServiceResponse::CallbackRegistered => Ok(()),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    #[cfg(feature = "c_integration")]
+    pub async fn register_callback_mined(
+        &mut self,
+        call: unsafe extern "C" fn(*mut CompletedTransaction),
+    ) -> Result<(), TransactionServiceError>
+    {
+        match self
+            .handle
+            .call(TransactionServiceRequest::RegisterCallbackReceivedTransactionReply(
+                call,
+            ))
+            .await??
+        {
+            TransactionServiceResponse::CallbackRegistered => Ok(()),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    #[cfg(feature = "c_integration")]
+    pub async fn register_callback_transaction_broadcast(
+        &mut self,
+        call: unsafe extern "C" fn(*mut CompletedTransaction),
+    ) -> Result<(), TransactionServiceError>
+    {
+        match self
+            .handle
+            .call(TransactionServiceRequest::RegisterCallbackReceivedTransactionReply(
+                call,
+            ))
+            .await??
+        {
+            TransactionServiceResponse::CallbackRegistered => Ok(()),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    #[cfg(feature = "test_harness")]
+    pub async fn test_complete_pending_transaction(
+        &mut self,
+        completed_tx: CompletedTransaction,
+    ) -> Result<(), TransactionServiceError>
+    {
+        match self
+            .handle
+            .call(TransactionServiceRequest::CompletePendingOutboundTransaction(
+                completed_tx,
+            ))
+            .await??
+        {
+            TransactionServiceResponse::CompletedPendingTransaction => Ok(()),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    #[cfg(feature = "test_harness")]
+    pub async fn test_accept_transaction(
+        &mut self,
+        tx_id: TxId,
+        amount: MicroTari,
+        source_public_key: CommsPublicKey,
+    ) -> Result<(), TransactionServiceError>
+    {
+        match self
+            .handle
+            .call(TransactionServiceRequest::AcceptTestTransaction((
+                tx_id,
+                amount,
+                source_public_key,
+            )))
+            .await??
+        {
+            TransactionServiceResponse::AcceptedTestTransaction => Ok(()),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    #[cfg(feature = "test_harness")]
+    pub async fn test_mine_transaction(&mut self, tx_id: TxId) -> Result<(), TransactionServiceError> {
+        match self
+            .handle
+            .call(TransactionServiceRequest::MineTransaction(tx_id))
+            .await??
+        {
+            TransactionServiceResponse::TransactionMined => Ok(()),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    #[cfg(feature = "test_harness")]
+    pub async fn test_broadcast_transaction(&mut self, tx_id: TxId) -> Result<(), TransactionServiceError> {
+        match self
+            .handle
+            .call(TransactionServiceRequest::BroadcastTransaction(tx_id))
+            .await??
+        {
+            TransactionServiceResponse::TransactionBroadcast => Ok(()),
             _ => Err(TransactionServiceError::UnexpectedApiResponse),
         }
     }

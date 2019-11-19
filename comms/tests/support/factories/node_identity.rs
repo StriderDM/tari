@@ -25,9 +25,9 @@ use rand::OsRng;
 use tari_comms::{
     connection::NetAddress,
     peer_manager::{NodeIdentity, PeerFeatures},
-    types::{CommsPublicKey, CommsSecretKey},
+    types::CommsSecretKey,
 };
-use tari_crypto::keys::{PublicKey, SecretKey};
+use tari_crypto::keys::SecretKey;
 
 pub fn create() -> NodeIdentityFactory {
     NodeIdentityFactory::default()
@@ -37,7 +37,7 @@ pub fn create() -> NodeIdentityFactory {
 pub struct NodeIdentityFactory {
     control_service_address: Option<NetAddress>,
     secret_key: Option<CommsSecretKey>,
-    public_key: Option<CommsPublicKey>,
+    //    public_key: Option<CommsPublicKey>,
     peer_features: PeerFeatures,
 }
 
@@ -51,8 +51,6 @@ impl NodeIdentityFactory {
     factory_setter!(with_secret_key, secret_key, Option<CommsSecretKey>);
 
     factory_setter!(with_peer_features, peer_features, PeerFeatures);
-
-    factory_setter!(with_public_key, public_key, Option<CommsPublicKey>);
 }
 
 impl TestFactory for NodeIdentityFactory {
@@ -66,16 +64,13 @@ impl TestFactory for NodeIdentityFactory {
                 &mut OsRng::new().map_err(TestFactoryError::build_failed())?,
             )))
             .unwrap();
-        let public_key = self
-            .public_key
-            .or_else(|| Some(CommsPublicKey::from_secret_key(&secret_key)))
-            .unwrap();
+
         let control_service_address = self
             .control_service_address
             .or(Some(super::net_address::create().build()?))
             .unwrap();
 
-        NodeIdentity::new(secret_key, public_key, control_service_address, self.peer_features)
+        NodeIdentity::new(secret_key, control_service_address, self.peer_features)
             .map_err(TestFactoryError::build_failed())
     }
 }

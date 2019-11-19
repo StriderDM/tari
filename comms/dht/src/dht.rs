@@ -23,11 +23,12 @@
 use self::outbound::OutboundMessageRequester;
 use crate::{
     actor::{DhtActor, DhtRequest, DhtRequester},
-    envelope::DhtMessageType,
+    discovery::{DhtDiscoveryRequest, DhtDiscoveryRequester, DhtDiscoveryService},
     inbound,
     inbound::{DecryptedDhtMessage, DhtInboundMessage},
     outbound,
     outbound::DhtOutboundRequest,
+    proto::envelope::DhtMessageType,
     store_forward,
     DhtConfig,
 };
@@ -37,7 +38,7 @@ use std::sync::Arc;
 use tari_comms::{
     message::InboundMessage,
     outbound_message_service::OutboundMessage,
-    peer_manager::{NodeIdentity, PeerFeature, PeerManager},
+    peer_manager::{NodeIdentity, PeerFeatures, PeerManager},
 };
 use tari_comms_middleware::MiddlewareError;
 use tari_shutdown::ShutdownSignal;
@@ -60,6 +61,8 @@ pub struct Dht {
     outbound_receiver: Option<mpsc::Receiver<DhtOutboundRequest>>,
     /// Sender for DHT requests
     dht_sender: mpsc::Sender<DhtRequest>,
+    /// Sender for DHT requests
+    discovery_sender: mpsc::Sender<DhtDiscoveryRequest>,
 }
 
 impl Dht {
@@ -73,6 +76,7 @@ impl Dht {
     {
         let (outbound_sender, outbound_receiver) = mpsc::channel(config.outbound_buffer_size);
         let (dht_sender, dht_receiver) = mpsc::channel(10);
+        let (discovery_sender, discovery_receiver) = mpsc::channel(10);
 
         let dht = Self {
             node_identity,
@@ -81,18 +85,43 @@ impl Dht {
             outbound_sender,
             outbound_receiver: Some(outbound_receiver),
             dht_sender,
+            discovery_sender,
         };
 
-        executor.spawn(dht.actor(dht_receiver, shutdown_signal).start());
+        executor.spawn(dht.actor(dht_receiver, shutdown_signal.clone()).run());
+        executor.spawn(dht.discovery_service(discovery_receiver, shutdown_signal).run());
 
         dht
     }
 
-    /// Create an actor
-    fn actor(&self, request_receiver: mpsc::Receiver<DhtRequest>, shutdown_signal: ShutdownSignal) -> DhtActor {
+    /// Create a DHT actor
+    fn actor(
+        &self,
+        request_receiver: mpsc::Receiver<DhtRequest>,
+        shutdown_signal: ShutdownSignal,
+    ) -> DhtActor<'static>
+    {
         DhtActor::new(
             self.config.clone(),
             Arc::clone(&self.node_identity),
+            Arc::clone(&self.peer_manager),
+            self.outbound_requester(),
+            request_receiver,
+            shutdown_signal,
+        )
+    }
+
+    /// Create the discovery service
+    fn discovery_service(
+        &self,
+        request_receiver: mpsc::Receiver<DhtDiscoveryRequest>,
+        shutdown_signal: ShutdownSignal,
+    ) -> DhtDiscoveryService
+    {
+        DhtDiscoveryService::new(
+            self.config.clone(),
+            Arc::clone(&self.node_identity),
+            Arc::clone(&self.peer_manager),
             self.outbound_requester(),
             request_receiver,
             shutdown_signal,
@@ -102,6 +131,16 @@ impl Dht {
     /// Return a new OutboundMessageRequester connected to the receiver
     pub fn outbound_requester(&self) -> OutboundMessageRequester {
         OutboundMessageRequester::new(self.outbound_sender.clone())
+    }
+
+    /// Returns a requester for the DhtActor associated with this instance
+    pub fn dht_requester(&self) -> DhtRequester {
+        DhtRequester::new(self.dht_sender.clone())
+    }
+
+    /// Returns a requester for the DhtDiscoveryService associated with this instance
+    pub fn discovery_service_requester(&self) -> DhtDiscoveryRequester {
+        DhtDiscoveryRequester::new(self.discovery_sender.clone(), self.config.discovery_request_timeout)
     }
 
     /// Takes ownership of the receiver for DhtOutboundRequest. Will return None if ownership
@@ -128,12 +167,13 @@ impl Dht {
         S: Service<DecryptedDhtMessage, Response = (), Error = MiddlewareError> + Clone + Send + Sync + 'static,
         S::Future: Send,
     {
-        let saf_storage = Arc::new(store_forward::SAFStorage::new(
+        let saf_storage = Arc::new(store_forward::SafStorage::new(
             self.config.saf_msg_cache_storage_capacity,
         ));
 
         ServiceBuilder::new()
             .layer(inbound::DeserializeLayer::new())
+            .layer(inbound::DedupLayer::new(self.dht_requester()))
             .layer(tower_filter::FilterLayer::new(self.unsupported_saf_messages_filter()))
             .layer(inbound::DecryptionLayer::new(Arc::clone(&self.node_identity)))
             .layer(store_forward::ForwardLayer::new(
@@ -149,6 +189,7 @@ impl Dht {
             .layer(store_forward::MessageHandlerLayer::new(
                 self.config.clone(),
                 saf_storage,
+                self.dht_requester(),
                 Arc::clone(&self.node_identity),
                 Arc::clone(&self.peer_manager),
                 self.outbound_requester(),
@@ -157,6 +198,7 @@ impl Dht {
                 self.config.clone(),
                 Arc::clone(&self.node_identity),
                 Arc::clone(&self.peer_manager),
+                self.discovery_service_requester(),
                 self.outbound_requester(),
             ))
             .into_inner()
@@ -182,9 +224,9 @@ impl Dht {
     {
         ServiceBuilder::new()
             .layer(outbound::BroadcastLayer::new(
-                self.config.clone(),
                 Arc::clone(&self.node_identity),
-                Arc::clone(&self.peer_manager),
+                self.dht_requester(),
+                self.discovery_service_requester(),
             ))
             .layer(outbound::EncryptionLayer::new(Arc::clone(&self.node_identity)))
             .layer(outbound::SerializeLayer::new(Arc::clone(&self.node_identity)))
@@ -199,12 +241,12 @@ impl Dht {
     {
         let node_identity = Arc::clone(&self.node_identity);
         move |msg: &DhtInboundMessage| {
-            if node_identity.has_peer_feature(&PeerFeature::DhtStoreForward) {
+            if node_identity.has_peer_features(PeerFeatures::DHT_STORE_FORWARD) {
                 return future::ready(Ok(()));
             }
 
             match msg.dht_header.message_type {
-                DhtMessageType::SAFRequestMessages | DhtMessageType::SAFStoredMessages => {
+                DhtMessageType::SafRequestMessages | DhtMessageType::SafStoredMessages => {
                     // TODO: This is an indication of node misbehaviour
                     warn!(
                         "Received store and forward message from PublicKey={}. Store and forward feature is not \
@@ -217,17 +259,14 @@ impl Dht {
             }
         }
     }
-
-    pub fn dht_requester(&self) -> DhtRequester {
-        DhtRequester::new(self.dht_sender.clone())
-    }
 }
 
 #[cfg(test)]
 mod test {
     use crate::{
-        envelope::{DhtMessageFlags, DhtMessageType},
+        envelope::DhtMessageFlags,
         outbound::DhtOutboundRequest,
+        proto::envelope::DhtMessageType,
         test_utils::{
             make_client_identity,
             make_comms_inbound_message,
@@ -236,18 +275,17 @@ mod test {
             make_peer_manager,
         },
         DhtBuilder,
-        DhtConfig,
     };
     use futures::{channel::mpsc, StreamExt};
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use tari_comms::{
-        message::{Message, MessageFlags, MessageHeader},
+        message::{MessageExt, MessageFlags},
         utils::crypt::{encrypt, generate_ecdh_secret},
+        wrap_in_envelope_body,
     };
     use tari_comms_middleware::sink::SinkMiddleware;
     use tari_shutdown::Shutdown;
-    use tari_utilities::message_format::MessageFormat;
-    use tokio::runtime::Runtime;
+    use tokio::{future::FutureExt, runtime::Runtime};
     use tower::{layer::Layer, Service};
 
     #[test]
@@ -269,19 +307,25 @@ mod test {
 
         let mut service = dht.inbound_middleware_layer().layer(SinkMiddleware::new(out_tx));
 
-        let header = MessageHeader::new("fake_type".to_string()).unwrap();
-        let msg = Message::from_message_format(header, "secret".to_string()).unwrap();
-        let dht_envelope = make_dht_envelope(&node_identity, msg.to_binary().unwrap(), DhtMessageFlags::empty());
-        let inbound_message =
-            make_comms_inbound_message(&node_identity, dht_envelope.to_binary().unwrap(), MessageFlags::empty());
+        let msg = wrap_in_envelope_body!(b"secret".to_vec()).unwrap();
+        let dht_envelope = make_dht_envelope(
+            &node_identity,
+            msg.to_encoded_bytes().unwrap(),
+            DhtMessageFlags::empty(),
+        );
+        let inbound_message = make_comms_inbound_message(
+            &node_identity,
+            dht_envelope.to_encoded_bytes().unwrap(),
+            MessageFlags::empty(),
+        );
 
         let msg = rt.block_on(async move {
             service.call(inbound_message).await.unwrap();
-            let msg = out_rx.next().await.unwrap();
-            msg.success().unwrap().deserialize_message::<String>().unwrap()
+            let msg = out_rx.next().timeout(Duration::from_secs(10)).await.unwrap().unwrap();
+            msg.success().unwrap().decode_part::<Vec<u8>>(0).unwrap().unwrap()
         });
 
-        assert_eq!(msg, "secret");
+        assert_eq!(msg, b"secret");
     }
 
     #[test]
@@ -303,22 +347,24 @@ mod test {
 
         let mut service = dht.inbound_middleware_layer().layer(SinkMiddleware::new(out_tx));
 
-        let header = MessageHeader::new("fake_type".to_string()).unwrap();
-        let msg = Message::from_message_format(header, "secret".to_string()).unwrap();
+        let msg = wrap_in_envelope_body!(b"secret".to_vec()).unwrap();
         // Encrypt for self
-        let ecdh_key = generate_ecdh_secret(&node_identity.secret_key, &node_identity.identity.public_key);
-        let encrypted_bytes = encrypt(&ecdh_key, &msg.to_binary().unwrap()).unwrap();
+        let ecdh_key = generate_ecdh_secret(node_identity.secret_key(), node_identity.public_key());
+        let encrypted_bytes = encrypt(&ecdh_key, &msg.to_encoded_bytes().unwrap()).unwrap();
         let dht_envelope = make_dht_envelope(&node_identity, encrypted_bytes, DhtMessageFlags::ENCRYPTED);
-        let inbound_message =
-            make_comms_inbound_message(&node_identity, dht_envelope.to_binary().unwrap(), MessageFlags::empty());
+        let inbound_message = make_comms_inbound_message(
+            &node_identity,
+            dht_envelope.to_encoded_bytes().unwrap(),
+            MessageFlags::empty(),
+        );
 
         let msg = rt.block_on(async move {
             service.call(inbound_message).await.unwrap();
-            let msg = out_rx.next().await.unwrap();
-            msg.success().unwrap().deserialize_message::<String>().unwrap()
+            let msg = out_rx.next().timeout(Duration::from_secs(10)).await.unwrap().unwrap();
+            msg.success().unwrap().decode_part::<Vec<u8>>(0).unwrap().unwrap()
         });
 
-        assert_eq!(msg, "secret");
+        assert_eq!(msg, b"secret");
     }
 
     #[test]
@@ -334,12 +380,6 @@ mod test {
             rt.executor(),
             shutdown.to_signal(),
         )
-        .with_config(DhtConfig {
-            // Do not want to have the auto join interfering by sending on the outbound requester
-            enable_auto_join: false,
-            enable_auto_stored_message_request: false,
-            ..Default::default()
-        })
         .finish();
 
         let rt = Runtime::new().unwrap();
@@ -350,22 +390,29 @@ mod test {
             .inbound_middleware_layer()
             .layer(SinkMiddleware::new(next_service_tx));
 
-        let header = MessageHeader::new("fake_type".to_string()).unwrap();
-        let msg = Message::from_message_format(header, "unencrypteable".to_string()).unwrap();
+        let msg = wrap_in_envelope_body!(b"unencrypteable".to_vec()).unwrap();
 
         // Encrypt for someone else
         let node_identity2 = make_node_identity();
-        let ecdh_key = generate_ecdh_secret(&node_identity2.secret_key, &node_identity2.identity.public_key);
-        let encrypted_bytes = encrypt(&ecdh_key, &msg.to_binary().unwrap()).unwrap();
+        let ecdh_key = generate_ecdh_secret(node_identity2.secret_key(), node_identity2.public_key());
+        let encrypted_bytes = encrypt(&ecdh_key, &msg.to_encoded_bytes().unwrap()).unwrap();
         let dht_envelope = make_dht_envelope(&node_identity, encrypted_bytes, DhtMessageFlags::ENCRYPTED);
-        let inbound_message =
-            make_comms_inbound_message(&node_identity, dht_envelope.to_binary().unwrap(), MessageFlags::empty());
+        let inbound_message = make_comms_inbound_message(
+            &node_identity,
+            dht_envelope.to_encoded_bytes().unwrap(),
+            MessageFlags::empty(),
+        );
 
         let mut oms_receiver = dht.take_outbound_receiver().unwrap();
 
         let msg = rt.block_on(async move {
             service.call(inbound_message).await.unwrap();
-            oms_receiver.next().await.unwrap()
+            oms_receiver
+                .next()
+                .timeout(Duration::from_secs(10))
+                .await
+                .unwrap()
+                .unwrap()
         });
 
         // Check that OMS got a request to forward
@@ -398,11 +445,21 @@ mod test {
             .inbound_middleware_layer()
             .layer(SinkMiddleware::new(next_service_tx));
 
-        let msg = Message::from_message_format((), "secret".to_string()).unwrap();
-        let mut dht_envelope = make_dht_envelope(&node_identity, msg.to_binary().unwrap(), DhtMessageFlags::empty());
-        dht_envelope.header.message_type = DhtMessageType::SAFStoredMessages;
-        let inbound_message =
-            make_comms_inbound_message(&node_identity, dht_envelope.to_binary().unwrap(), MessageFlags::empty());
+        let msg = wrap_in_envelope_body!(b"secret".to_vec()).unwrap();
+        let mut dht_envelope = make_dht_envelope(
+            &node_identity,
+            msg.to_encoded_bytes().unwrap(),
+            DhtMessageFlags::empty(),
+        );
+        dht_envelope.header.as_mut().and_then(|header| {
+            header.message_type = DhtMessageType::SafStoredMessages as i32;
+            Some(header)
+        });
+        let inbound_message = make_comms_inbound_message(
+            &node_identity,
+            dht_envelope.to_encoded_bytes().unwrap(),
+            MessageFlags::empty(),
+        );
 
         let err = rt.block_on(service.call(inbound_message));
         assert!(err.is_err());

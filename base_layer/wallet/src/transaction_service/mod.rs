@@ -22,22 +22,27 @@
 pub mod error;
 pub mod handle;
 pub mod service;
+pub mod storage;
 
 use crate::{
     output_manager_service::handle::OutputManagerHandle,
-    transaction_service::{handle::TransactionServiceHandle, service::TransactionService},
+    transaction_service::{
+        handle::TransactionServiceHandle,
+        service::TransactionService,
+        storage::database::{TransactionBackend, TransactionDatabase},
+    },
 };
 use futures::{future, Future, Stream, StreamExt};
 use log::*;
 use std::sync::Arc;
 use tari_broadcast_channel::bounded;
+use tari_comms::peer_manager::NodeIdentity;
 use tari_comms_dht::outbound::OutboundMessageRequester;
-use tari_core::transaction_protocol::{recipient::RecipientSignedMessage, sender::TransactionSenderMessage};
 use tari_p2p::{
     comms_connector::PeerMessage,
     domain_message::DomainMessage,
-    services::utils::{map_deserialized, ok_or_skip_result},
-    tari_message::{BlockchainMessage, TariMessageType},
+    services::utils::{map_decode, ok_or_skip_result},
+    tari_message::TariMessageType,
 };
 use tari_pubsub::TopicSubscriptionFactory;
 use tari_service_framework::{
@@ -47,38 +52,54 @@ use tari_service_framework::{
     ServiceInitializer,
 };
 use tari_shutdown::ShutdownSignal;
+use tari_transactions::transaction_protocol::proto;
 use tokio::runtime::TaskExecutor;
 
 const LOG_TARGET: &'static str = "base_layer::wallet::transaction_service";
 
-pub struct TransactionServiceInitializer {
-    subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage<TariMessageType>>>>,
+pub struct TransactionServiceInitializer<T>
+where T: TransactionBackend
+{
+    subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+    backend: Option<T>,
+    node_identity: Arc<NodeIdentity>,
 }
 
-impl TransactionServiceInitializer {
+impl<T> TransactionServiceInitializer<T>
+where T: TransactionBackend
+{
     pub fn new(
-        subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage<TariMessageType>>>>,
-    ) -> Self {
-        Self { subscription_factory }
+        subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+        backend: T,
+        node_identity: Arc<NodeIdentity>,
+    ) -> Self
+    {
+        Self {
+            subscription_factory,
+            backend: Some(backend),
+            node_identity,
+        }
     }
 
     /// Get a stream of inbound Text messages
-    fn transaction_stream(&self) -> impl Stream<Item = DomainMessage<TransactionSenderMessage>> {
+    fn transaction_stream(&self) -> impl Stream<Item = DomainMessage<proto::TransactionSenderMessage>> {
         self.subscription_factory
-            .get_subscription(TariMessageType::new(BlockchainMessage::Transaction))
-            .map(map_deserialized::<TransactionSenderMessage>)
+            .get_subscription(TariMessageType::Transaction)
+            .map(map_decode::<proto::TransactionSenderMessage>)
             .filter_map(ok_or_skip_result)
     }
 
-    fn transaction_reply_stream(&self) -> impl Stream<Item = DomainMessage<RecipientSignedMessage>> {
+    fn transaction_reply_stream(&self) -> impl Stream<Item = DomainMessage<proto::RecipientSignedMessage>> {
         self.subscription_factory
-            .get_subscription(TariMessageType::new(BlockchainMessage::TransactionReply))
-            .map(map_deserialized::<RecipientSignedMessage>)
+            .get_subscription(TariMessageType::TransactionReply)
+            .map(map_decode::<proto::RecipientSignedMessage>)
             .filter_map(ok_or_skip_result)
     }
 }
 
-impl ServiceInitializer for TransactionServiceInitializer {
+impl<T> ServiceInitializer for TransactionServiceInitializer<T>
+where T: TransactionBackend + 'static
+{
     type Future = impl Future<Output = Result<(), ServiceInitializationError>>;
 
     fn initialize(
@@ -99,6 +120,13 @@ impl ServiceInitializer for TransactionServiceInitializer {
         // Register handle before waiting for handles to be ready
         handles_fut.register(transaction_handle);
 
+        let backend = self
+            .backend
+            .take()
+            .expect("Cannot start Transaction Service without providing a backend");
+
+        let node_identity = self.node_identity.clone();
+
         executor.spawn(async move {
             let handles = handles_fut.await;
 
@@ -110,12 +138,14 @@ impl ServiceInitializer for TransactionServiceInitializer {
                 .expect("Output Manager Service handle required for TransactionService");
 
             let service = TransactionService::new(
+                TransactionDatabase::new(backend),
                 receiver,
                 transaction_stream,
                 transaction_reply_stream,
                 output_manager_service,
                 outbound_message_service,
                 publisher,
+                node_identity,
             )
             .start();
             futures::pin_mut!(service);

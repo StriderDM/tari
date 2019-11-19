@@ -22,7 +22,7 @@
 
 use derive_error::Error;
 use futures::channel::mpsc::SendError;
-use tari_comms::{connection::ConnectionError, message::MessageError, peer_manager::PeerManagerError};
+use tari_comms::{connection::ConnectionError, message::MessageError};
 use tari_crypto::signatures::SchnorrSignatureError;
 use tari_utilities::message_format::MessageFormatError;
 
@@ -31,8 +31,10 @@ pub enum DhtOutboundError {
     SendError(SendError),
     MessageSerializationError(MessageError),
     MessageFormatError(MessageFormatError),
-    PeerManagerError(PeerManagerError),
     ConnectionError(ConnectionError),
     SignatureError(SchnorrSignatureError),
+    /// Requester reply channel closed before response was received
     RequesterReplyChannelClosed,
+    /// Peer selection failed
+    PeerSelectionFailed,
 }

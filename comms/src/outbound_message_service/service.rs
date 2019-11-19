@@ -23,12 +23,9 @@
 use crate::{
     connection::PeerConnection,
     connection_manager::ConnectionManagerRequester,
-    consts::COMMS_RNG,
-    message::{MessageEnvelope, MessageEnvelopeHeader},
+    message::{Envelope, MessageExt},
     outbound_message_service::{error::OutboundServiceError, messages::OutboundMessage, OutboundServiceConfig},
     peer_manager::{NodeId, NodeIdentity},
-    types::MESSAGE_PROTOCOL_VERSION,
-    utils::signature,
 };
 use futures::{
     channel::oneshot,
@@ -46,10 +43,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tari_shutdown::ShutdownSignal;
-use tari_utilities::message_format::MessageFormat;
 use tokio::timer;
 
-const LOG_TARGET: &'static str = "comms::outbound_message_service::worker";
+const LOG_TARGET: &str = "comms::outbound_message_service::worker";
 
 /// The state of the dial request
 pub struct DialState {
@@ -98,7 +94,7 @@ impl DialState {
         if self.attempts <= 1 {
             return 0;
         }
-        let secs = 0.5 * (f32::powf(2.0, self.attempts as f32) - 1.0);
+        let secs = 0.8 * (f32::powf(2.0, self.attempts as f32) - 1.0);
         cmp::max(2, secs.ceil() as u64)
     }
 }
@@ -185,7 +181,13 @@ where TMsgStream: Stream<Item = OutboundMessage> + Unpin
                                 state.node_id
                             );
                             if state.attempts >= self.config.max_attempts {
+                                log_if_error!(
+                                    target: LOG_TARGET,
+                                    "Unable to set last connection failed because '{}'",
+                                    self.connection_manager.set_last_connection_failed(state.node_id.clone()).await
+                                );
                                 self.dial_cancel_signals.remove(&state.node_id);
+                                self.pending_connect_requests.remove(&state.node_id);
                                 debug!(target: LOG_TARGET, "NodeId={} Maximum attempts reached. Discarding messages.", state.node_id);
                             } else {
                                 // Should retry this connection attempt
@@ -268,6 +270,11 @@ where TMsgStream: Stream<Item = OutboundMessage> + Unpin
 
     /// Returns a DialState for the NodeId if a connection is not currently being attempted
     fn enqueue_new_message(&mut self, msg: OutboundMessage) -> Option<DialState> {
+        trace!(
+            target: LOG_TARGET,
+            "{} attempt(s) in progress",
+            self.pending_connect_requests.len()
+        );
         match self.pending_connect_requests.get_mut(&msg.peer_node_id) {
             // Connection being attempted for peer. Add the message to the queue to be sent once connected.
             Some(msgs) => {
@@ -304,6 +311,13 @@ where TMsgStream: Stream<Item = OutboundMessage> + Unpin
     {
         match connect_result {
             Ok(conn) => {
+                log_if_error!(
+                    target: LOG_TARGET,
+                    "Unable to set last connection success because '{}'",
+                    self.connection_manager
+                        .set_last_connection_succeeded(state.node_id.clone())
+                        .await
+                );
                 if let Err(err) = self.handle_new_connection(&state.node_id, conn).await {
                     error!(
                         target: LOG_TARGET,
@@ -381,26 +395,16 @@ where TMsgStream: Stream<Item = OutboundMessage> + Unpin
     }
 
     async fn send_message(&self, conn: &PeerConnection, message: OutboundMessage) -> Result<(), OutboundServiceError> {
-        let envelope = self.construct_message_envelope(message)?;
-        conn.send(envelope.into_frame_set())
-            .map_err(OutboundServiceError::ConnectionError)
-    }
-
-    fn construct_message_envelope(&self, message: OutboundMessage) -> Result<MessageEnvelope, OutboundServiceError> {
         let OutboundMessage { flags, body, .. } = message;
-
-        // Sign the comms envelope
-        let signature = COMMS_RNG
-            .with(|rng| signature::sign(&mut *rng.borrow_mut(), self.node_identity.secret_key.clone(), &body))?;
-
-        let header = MessageEnvelopeHeader {
-            version: MESSAGE_PROTOCOL_VERSION,
+        let envelope = Envelope::construct_signed(
+            self.node_identity.secret_key(),
+            self.node_identity.public_key(),
+            body,
             flags,
-            message_public_key: self.node_identity.identity.public_key.clone(),
-            message_signature: signature.to_binary()?,
-        };
+        )?;
+        let frame = envelope.to_encoded_bytes()?;
 
-        Ok(MessageEnvelope::new(header.to_binary()?, body))
+        conn.send(vec![frame]).map_err(OutboundServiceError::ConnectionError)
     }
 }
 
@@ -415,8 +419,9 @@ mod test {
         test_utils::node_id,
     };
     use futures::{channel::mpsc, stream, SinkExt};
-    use std::convert::TryFrom;
+    use prost::Message;
     use tari_shutdown::Shutdown;
+    use tari_test_utils::collect_stream;
     use tokio::runtime::Runtime;
 
     #[test]
@@ -430,7 +435,7 @@ mod test {
         let (conn_man_tx, mut conn_man_rx) = mpsc::channel(2);
         let conn_manager = ConnectionManagerRequester::new(conn_man_tx);
 
-        let node_identity = Arc::new(NodeIdentity::random_for_test(None, PeerFeatures::default()));
+        let node_identity = Arc::new(NodeIdentity::random_for_test(None, PeerFeatures::empty()));
         let mut shutdown = Shutdown::new();
 
         let service = OutboundMessageService::new(
@@ -497,6 +502,7 @@ mod test {
                         _ => panic!("unexpected node id in connection manager request"),
                     }
                 },
+                _ => panic!("unexpected connection manager request"),
             }
         });
 
@@ -511,7 +517,19 @@ mod test {
         assert_send_msg(msg, b"E");
 
         // Connection should be reused, so connection manager should not receive another request to connect.
-        assert!(conn_man_rx.try_next().is_err());
+        let requests = collect_stream!(rt, conn_man_rx, take = 2, timeout = Duration::from_secs(3));
+        assert!(requests.iter().all(|req| {
+            match req {
+                ConnectionManagerRequest::DialPeer(_) => false,
+                _ => true,
+            }
+        }));
+        assert!(requests.iter().any(|req| {
+            match req {
+                ConnectionManagerRequest::SetLastConnectionSucceeded(_) => true,
+                _ => false,
+            }
+        }));
 
         // Abort pending connections and shutdown the service
         shutdown.trigger().unwrap();
@@ -520,9 +538,9 @@ mod test {
 
     fn assert_send_msg(control_msg: peer_connection::ControlMessage, msg: &[u8]) {
         match control_msg {
-            peer_connection::ControlMessage::SendMsg(frames) => {
-                let envelope = MessageEnvelope::try_from(frames).unwrap();
-                assert_eq!(envelope.body_frame().as_slice(), msg);
+            peer_connection::ControlMessage::SendMsg(mut frames) => {
+                let envelope = Envelope::decode(frames.remove(0)).unwrap();
+                assert_eq!(envelope.body.as_slice(), msg);
             },
             _ => panic!(),
         }
@@ -536,22 +554,22 @@ mod test {
         state.attempts = 1;
         assert_eq!(state.exponential_backoff_offset(), 0);
         state.attempts = 2;
-        assert_eq!(state.exponential_backoff_offset(), 2);
+        assert_eq!(state.exponential_backoff_offset(), 3);
         state.attempts = 3;
-        assert_eq!(state.exponential_backoff_offset(), 4);
+        assert_eq!(state.exponential_backoff_offset(), 6);
         state.attempts = 4;
-        assert_eq!(state.exponential_backoff_offset(), 8);
+        assert_eq!(state.exponential_backoff_offset(), 12);
         state.attempts = 5;
-        assert_eq!(state.exponential_backoff_offset(), 16);
+        assert_eq!(state.exponential_backoff_offset(), 25);
         state.attempts = 6;
-        assert_eq!(state.exponential_backoff_offset(), 32);
+        assert_eq!(state.exponential_backoff_offset(), 51);
         state.attempts = 7;
-        assert_eq!(state.exponential_backoff_offset(), 64);
+        assert_eq!(state.exponential_backoff_offset(), 102);
         state.attempts = 8;
-        assert_eq!(state.exponential_backoff_offset(), 128);
+        assert_eq!(state.exponential_backoff_offset(), 204);
         state.attempts = 9;
-        assert_eq!(state.exponential_backoff_offset(), 256);
+        assert_eq!(state.exponential_backoff_offset(), 409);
         state.attempts = 10;
-        assert_eq!(state.exponential_backoff_offset(), 512);
+        assert_eq!(state.exponential_backoff_offset(), 819);
     }
 }

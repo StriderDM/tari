@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package tari.dht.envelope;
+
+enum DhtMessageType {
+    // Indicated this message is not a DHT message
+    DhtMessageTypeNone = 0;
+    // Join Request
+    DhtMessageTypeJoin = 1;
+    // Discovery request
+    DhtMessageTypeDiscovery = 2;
+    // Response to a discovery request
+    DhtMessageTypeDiscoveryResponse = 3;
+    // Request stored messages from a node
+    DhtMessageTypeSafRequestMessages = 20;
+    // Stored messages response
+    DhtMessageTypeSafStoredMessages = 21;
+}
+
+message DhtHeader {
+    uint32 version = 1;
+    oneof destination {
+        // The sender has chosen not to disclose the message destination, or the destination is
+        // the peer being sent to.
+        bool unknown = 2;
+        /// Destined for a particular public key
+        bytes public_key = 3;
+        /// Destined for a particular node id, or network region
+        bytes node_id = 4;
+    }
+
+    // Origin public key of the message. This can be the same peer that sent the message
+    // or another peer if the message should be forwarded.
+    bytes origin_public_key = 5;
+    bytes origin_signature = 6;
+    DhtMessageType message_type = 7;
+    uint32 flags = 8;
+}
+
+message DhtEnvelope {
+    DhtHeader header = 1;
+    bytes body = 2;
+}

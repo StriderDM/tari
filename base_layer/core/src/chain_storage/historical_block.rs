@@ -20,18 +20,21 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{blocks::Block, transaction::TransactionOutput, types::Commitment};
+use crate::blocks::Block;
+use serde::{Deserialize, Serialize};
+use tari_transactions::{transaction::TransactionOutput, types::Commitment};
 
 /// The representation of a historical block in the blockchain. It is essentially identical to a protocol-defined
 /// block but contains some extra metadata that clients such as Block Explorers will find interesting.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct HistoricalBlock {
     /// The number of blocks that have been mined since this block, including this one. The current tip will have one
     /// confirmation.
-    confirmations: u64,
+    pub confirmations: u64,
     /// An array of commitments of the outputs from this block that have subsequently been spent.
-    spent_commitments: Vec<Commitment>,
+    pub spent_commitments: Vec<Commitment>,
     /// The underlying block
-    block: Block,
+    pub block: Block,
 }
 
 impl HistoricalBlock {

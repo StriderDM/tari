@@ -22,9 +22,9 @@
 
 use crate::output_manager_service::{handle::OutputManagerHandle, service::OutputManagerService};
 
+use crate::output_manager_service::storage::database::{OutputManagerBackend, OutputManagerDatabase};
 use futures::{future, Future};
 use log::*;
-use tari_core::types::PrivateKey;
 use tari_service_framework::{
     handles::ServiceHandlesFuture,
     reply_channel,
@@ -32,32 +32,46 @@ use tari_service_framework::{
     ServiceInitializer,
 };
 use tari_shutdown::ShutdownSignal;
+use tari_transactions::types::PrivateKey;
 use tokio::runtime::TaskExecutor;
 
 pub mod error;
 pub mod handle;
 pub mod service;
+pub mod storage;
 
 const LOG_TARGET: &'static str = "wallet::output_manager_service::initializer";
 
+pub type TxId = u64;
+
 #[derive(Clone)]
 pub struct OutputManagerConfig {
-    pub master_key: PrivateKey,
+    pub master_seed: PrivateKey,
     pub branch_seed: String,
     pub primary_key_index: usize,
 }
 
-pub struct OutputManagerServiceInitializer {
+pub struct OutputManagerServiceInitializer<T>
+where T: OutputManagerBackend
+{
     config: Option<OutputManagerConfig>,
+    backend: Option<T>,
 }
 
-impl OutputManagerServiceInitializer {
-    pub fn new(config: OutputManagerConfig) -> Self {
-        Self { config: Some(config) }
+impl<T> OutputManagerServiceInitializer<T>
+where T: OutputManagerBackend
+{
+    pub fn new(config: OutputManagerConfig, backend: T) -> Self {
+        Self {
+            config: Some(config),
+            backend: Some(backend),
+        }
     }
 }
 
-impl ServiceInitializer for OutputManagerServiceInitializer {
+impl<T> ServiceInitializer for OutputManagerServiceInitializer<T>
+where T: OutputManagerBackend + 'static
+{
     type Future = impl Future<Output = Result<(), ServiceInitializationError>>;
 
     fn initialize(
@@ -78,14 +92,16 @@ impl ServiceInitializer for OutputManagerServiceInitializer {
 
         // Register handle before waiting for handles to be ready
         handles_fut.register(oms_handle);
+
+        let backend = self
+            .backend
+            .take()
+            .expect("Cannot start Output Manager Service without setting a storage backend");
+
         executor.spawn(async move {
-            let service = OutputManagerService::new(
-                receiver,
-                config.master_key,
-                config.branch_seed,
-                config.primary_key_index,
-            )
-            .start();
+            let service = OutputManagerService::new(receiver, config, OutputManagerDatabase::new(backend))
+                .expect("Could not initialize Output Manager Service")
+                .start();
 
             futures::pin_mut!(service);
             future::select(service, shutdown).await;

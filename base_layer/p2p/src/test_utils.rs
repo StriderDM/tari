@@ -24,12 +24,11 @@ use rand::rngs::OsRng;
 use std::sync::Arc;
 use tari_comms::{
     connection::NetAddress,
-    message::{MessageEnvelopeHeader, MessageFlags},
     peer_manager::{NodeIdentity, Peer, PeerFeatures, PeerFlags},
     utils::signature,
 };
 use tari_comms_dht::{
-    envelope::{DhtHeader, DhtMessageFlags, DhtMessageType, NodeDestination},
+    envelope::{DhtMessageFlags, DhtMessageHeader, DhtMessageType, NodeDestination},
     inbound::DhtInboundMessage,
 };
 use tari_utilities::message_format::MessageFormat;
@@ -54,18 +53,18 @@ pub fn make_node_identity() -> Arc<NodeIdentity> {
         NodeIdentity::random(
             &mut OsRng::new().unwrap(),
             "127.0.0.1:9000".parse().unwrap(),
-            PeerFeatures::communication_node_default(),
+            PeerFeatures::COMMUNICATION_NODE,
         )
         .unwrap(),
     )
 }
 
-pub fn make_dht_header(node_identity: &NodeIdentity, message: &Vec<u8>, flags: DhtMessageFlags) -> DhtHeader {
-    DhtHeader {
+pub fn make_dht_header(node_identity: &NodeIdentity, message: &Vec<u8>, flags: DhtMessageFlags) -> DhtMessageHeader {
+    DhtMessageHeader {
         version: 0,
-        destination: NodeDestination::Unspecified,
-        origin_public_key: node_identity.identity.public_key.clone(),
-        origin_signature: signature::sign(&mut OsRng::new().unwrap(), node_identity.secret_key.clone(), message)
+        destination: NodeDestination::Unknown,
+        origin_public_key: node_identity.public_key().clone(),
+        origin_signature: signature::sign(&mut OsRng::new().unwrap(), node_identity.secret_key().clone(), message)
             .unwrap()
             .to_binary()
             .unwrap(),
@@ -83,18 +82,12 @@ pub fn make_dht_inbound_message(
     DhtInboundMessage::new(
         make_dht_header(node_identity, &message, flags),
         Peer::new(
-            node_identity.identity.public_key.clone(),
-            node_identity.identity.node_id.clone(),
+            node_identity.public_key().clone(),
+            node_identity.node_id().clone(),
             Vec::<NetAddress>::new().into(),
             PeerFlags::empty(),
-            PeerFeatures::communication_node_default(),
+            PeerFeatures::COMMUNICATION_NODE,
         ),
-        MessageEnvelopeHeader {
-            version: 0,
-            message_public_key: node_identity.identity.public_key.clone(),
-            message_signature: Vec::new(),
-            flags: MessageFlags::empty(),
-        },
         message,
     )
 }

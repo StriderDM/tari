@@ -30,7 +30,7 @@
 //! If the Peer Manager is instantiated with a provided DataStore it will provide persistence via the provided DataStore
 //! implementation.
 //!
-//! ```edition2018
+//! ```norun
 //! # use tari_comms::peer_manager::{NodeId, Peer, PeerManager, PeerFlags, PeerFeatures};
 //! # use tari_comms::types::CommsPublicKey;
 //! # use tari_comms::connection::{NetAddress, NetAddressesWithStats};
@@ -44,7 +44,7 @@
 //! let (dest_sk, pk) = CommsPublicKey::random_keypair(&mut rng);
 //! let node_id = NodeId::from_key(&pk).unwrap();
 //! let net_addresses = NetAddressesWithStats::from("1.2.3.4:8000".parse::<NetAddress>().unwrap());
-//! let peer = Peer::new(pk, node_id.clone(), net_addresses, PeerFlags::default(), PeerFeatures::communication_node_default());
+//! let peer = Peer::new(pk, node_id.clone(), net_addresses, PeerFlags::default(), PeerFeatures::COMMUNICATION_NODE);
 //! let database_name = "pm_peer_database";
 //! let datastore = LMDBBuilder::new()
 //!            .set_path("/tmp/")
@@ -58,24 +58,27 @@
 //!
 //! peer_manager.add_peer(peer.clone());
 //!
-//! let returned_peer = peer_manager.find_with_node_id(&node_id).unwrap();
+//! let returned_peer = peer_manager.find_by_node_id(&node_id).unwrap();
 //! ```
 
 mod peer_features;
 
+mod connection_stats;
 mod error;
 pub mod node_id;
 pub mod node_identity;
 pub mod peer;
 pub mod peer_key;
 mod peer_manager;
+mod peer_query;
 pub mod peer_storage;
 
 pub use self::{
     error::PeerManagerError,
     node_id::NodeId,
-    node_identity::{NodeIdentity, PeerNodeIdentity},
+    node_identity::NodeIdentity,
     peer::{Peer, PeerFlags},
-    peer_features::{PeerFeature, PeerFeatures},
+    peer_features::PeerFeatures,
     peer_manager::PeerManager,
+    peer_query::{PeerQuery, PeerQuerySortBy},
 };

@@ -24,13 +24,13 @@ use crate::{
     connection::net_address::NetAddress,
     consts::{COMMS_RNG, PEER_MANAGER_MAX_FLOOD_PEERS},
     peer_manager::{
+        connection_stats::PeerConnectionStats,
         node_id::{NodeDistance, NodeId},
-        node_identity::PeerNodeIdentity,
         peer::{Peer, PeerFlags},
         peer_key::{generate_peer_key, PeerKey},
-        PeerFeature,
         PeerFeatures,
         PeerManagerError,
+        PeerQuery,
     },
     types::{CommsDatabase, CommsPublicKey},
 };
@@ -110,6 +110,7 @@ where DS: KeyValueStore<PeerKey, Peer>
         net_addresses: Option<Vec<NetAddress>>,
         flags: Option<PeerFlags>,
         peer_features: Option<PeerFeatures>,
+        connection_stats: Option<PeerConnectionStats>,
     ) -> Result<(), PeerManagerError>
     {
         match self.public_key_hm.get(public_key) {
@@ -120,14 +121,14 @@ where DS: KeyValueStore<PeerKey, Peer>
                 let mut stored_peer: Peer = self
                     .peers
                     .get(&peer_key)
-                    .map_err(|e| PeerManagerError::DatabaseError(e))?
+                    .map_err(PeerManagerError::DatabaseError)?
                     .ok_or(PeerManagerError::PeerNotFoundError)?;
-                stored_peer.update(node_id, net_addresses, flags, peer_features);
+                stored_peer.update(node_id, net_addresses, flags, peer_features, connection_stats);
 
                 self.add_hashmap_links(peer_key, &stored_peer);
                 self.peers
                     .insert(peer_key, stored_peer)
-                    .map_err(|e| PeerManagerError::DatabaseError(e))?;
+                    .map_err(PeerManagerError::DatabaseError)?;
                 Ok(())
             },
             None => Err(PeerManagerError::PeerNotFoundError),
@@ -171,7 +172,7 @@ where DS: KeyValueStore<PeerKey, Peer>
     }
 
     /// Find the peer with the provided NodeID
-    pub fn find_with_node_id(&self, node_id: &NodeId) -> Result<Peer, PeerManagerError> {
+    pub fn find_by_node_id(&self, node_id: &NodeId) -> Result<Peer, PeerManagerError> {
         let peer_key = *self
             .node_id_hm
             .get(&node_id)
@@ -183,7 +184,7 @@ where DS: KeyValueStore<PeerKey, Peer>
     }
 
     /// Find the peer with the provided PublicKey
-    pub fn find_with_public_key(&self, public_key: &CommsPublicKey) -> Result<Peer, PeerManagerError> {
+    pub fn find_by_public_key(&self, public_key: &CommsPublicKey) -> Result<Peer, PeerManagerError> {
         let peer_key = *self
             .public_key_hm
             .get(&public_key)
@@ -195,7 +196,7 @@ where DS: KeyValueStore<PeerKey, Peer>
     }
 
     /// Find the peer with the provided NetAddress
-    pub fn find_with_net_address(&self, net_address: &NetAddress) -> Result<Peer, PeerManagerError> {
+    pub fn find_by_net_address(&self, net_address: &NetAddress) -> Result<Peer, PeerManagerError> {
         let peer_key = *self
             .net_address_hm
             .get(&net_address)
@@ -217,16 +218,18 @@ where DS: KeyValueStore<PeerKey, Peer>
     }
 
     /// Constructs a single NodeIdentity for the peer corresponding to the provided NodeId
-    pub fn direct_identity_node_id(&self, node_id: &NodeId) -> Result<PeerNodeIdentity, PeerManagerError> {
-        let peer_key = *self
+    pub fn direct_identity_node_id(&self, node_id: &NodeId) -> Result<Peer, PeerManagerError> {
+        let peer_key = self
             .node_id_hm
             .get(&node_id)
             .ok_or(PeerManagerError::PeerNotFoundError)?;
+
         let peer: Peer = self
             .peers
             .get(&peer_key)
             .map_err(PeerManagerError::DatabaseError)?
             .ok_or(PeerManagerError::PeerNotFoundError)?;
+
         if peer.is_banned() {
             Err(PeerManagerError::BannedPeer)
         } else {
@@ -235,11 +238,7 @@ where DS: KeyValueStore<PeerKey, Peer>
     }
 
     /// Constructs a single NodeIdentity for the peer corresponding to the provided NodeId
-    pub fn direct_identity_public_key(
-        &self,
-        public_key: &CommsPublicKey,
-    ) -> Result<PeerNodeIdentity, PeerManagerError>
-    {
+    pub fn direct_identity_public_key(&self, public_key: &CommsPublicKey) -> Result<Peer, PeerManagerError> {
         let peer_key = *self
             .public_key_hm
             .get(&public_key)
@@ -252,33 +251,37 @@ where DS: KeyValueStore<PeerKey, Peer>
         if peer.is_banned() {
             Err(PeerManagerError::BannedPeer)
         } else {
-            Ok(peer.into())
+            Ok(peer)
         }
     }
 
-    /// Compile a list of all known node identities that can be used for the flood BroadcastStrategy
-    pub fn flood_identities(&self) -> Result<Vec<PeerNodeIdentity>, PeerManagerError> {
+    /// Perform an ad-hoc query on the peer database.
+    pub fn perform_query(&self, query: PeerQuery) -> Result<Vec<Peer>, PeerManagerError> {
+        query.executor(&self.peers).get_results()
+    }
+
+    /// Compile a list of all known peers
+    pub fn flood_peers(&self) -> Result<Vec<Peer>, PeerManagerError> {
         self.peers
             .filter_take(PEER_MANAGER_MAX_FLOOD_PEERS, |(_, peer)| {
-                !peer.is_banned() && peer.has_feature(&PeerFeature::MessagePropagation)
+                !peer.is_banned() && peer.has_features(PeerFeatures::MESSAGE_PROPAGATION)
             })
             .map(|pairs| pairs.into_iter().map(|(_, peer)| peer.into()).collect())
             .map_err(PeerManagerError::DatabaseError)
     }
 
-    /// Compile a list of node identities that can be used for the closest BroadcastStrategy
-    pub fn closest_identities(
+    /// Compile a list of peers
+    pub fn closest_peers(
         &self,
         node_id: &NodeId,
         n: usize,
         excluded_peers: &Vec<CommsPublicKey>,
-    ) -> Result<Vec<PeerNodeIdentity>, PeerManagerError>
+    ) -> Result<Vec<Peer>, PeerManagerError>
     {
         let mut peer_keys: Vec<PeerKey> = Vec::new();
         let mut dists: Vec<NodeDistance> = Vec::new();
         self.peers
-            .for_each(|pair| {
-                let (peer_key, peer) = pair.unwrap();
+            .for_each_ok(|(peer_key, peer)| {
                 if !peer.is_banned() && !excluded_peers.contains(&peer.public_key) {
                     peer_keys.push(peer_key);
                     dists.push(node_id.distance(&peer.node_id));
@@ -312,8 +315,8 @@ where DS: KeyValueStore<PeerKey, Peer>
         Ok(nearest_identities)
     }
 
-    /// Compile a list of node identities that can be used for the random BroadcastStrategy
-    pub fn random_identities(&mut self, n: usize) -> Result<Vec<PeerNodeIdentity>, PeerManagerError> {
+    /// Compile a random list of peers of size _n_
+    pub fn random_peers(&self, n: usize) -> Result<Vec<Peer>, PeerManagerError> {
         // TODO: Send to a random set of Communication Nodes
         let mut peer_keys = self
             .peers
@@ -503,7 +506,7 @@ where DS: KeyValueStore<PeerKey, Peer>
             .map_err(PeerManagerError::DatabaseError)
     }
 
-    /// Enables Thread safe access - Mark that a successful connection was established with the specified net address
+    /// Mark that a successful connection was established with the specified net address
     pub fn mark_successful_connection_attempt(&mut self, net_address: &NetAddress) -> Result<(), PeerManagerError> {
         let peer_key = *self
             .net_address_hm
@@ -514,6 +517,7 @@ where DS: KeyValueStore<PeerKey, Peer>
             .get(&peer_key)
             .map_err(PeerManagerError::DatabaseError)?
             .ok_or(PeerManagerError::PeerNotFoundError)?;
+
         peer.addresses
             .mark_successful_connection_attempt(net_address)
             .map_err(PeerManagerError::NetAddressError)?;
@@ -522,7 +526,7 @@ where DS: KeyValueStore<PeerKey, Peer>
             .map_err(PeerManagerError::DatabaseError)
     }
 
-    /// Enables Thread safe access - Mark that a connection could not be established with the specified net address
+    /// Mark that a connection could not be established with the specified net address
     pub fn mark_failed_connection_attempt(&mut self, net_address: &NetAddress) -> Result<(), PeerManagerError> {
         let peer_key = *self
             .net_address_hm
@@ -533,6 +537,7 @@ where DS: KeyValueStore<PeerKey, Peer>
             .get(&peer_key)
             .map_err(PeerManagerError::DatabaseError)?
             .ok_or(PeerManagerError::PeerNotFoundError)?;
+
         peer.addresses
             .mark_failed_connection_attempt(net_address)
             .map_err(PeerManagerError::NetAddressError)?;
@@ -554,6 +559,7 @@ where DS: KeyValueStore<PeerKey, Peer>
             .map_err(PeerManagerError::DatabaseError)?
             .ok_or(PeerManagerError::PeerNotFoundError)?;
         peer.addresses.reset_connection_attempts();
+
         self.peers
             .insert(peer_key, peer)
             .map_err(PeerManagerError::DatabaseError)
@@ -615,25 +621,13 @@ mod test {
         let mut net_addresses = NetAddressesWithStats::from(net_address1.clone());
         net_addresses.add_net_address(&net_address2);
         net_addresses.add_net_address(&net_address3);
-        let peer1 = Peer::new(
-            pk,
-            node_id,
-            net_addresses,
-            PeerFlags::default(),
-            PeerFeatures::default(),
-        );
+        let peer1 = Peer::new(pk, node_id, net_addresses, PeerFlags::default(), PeerFeatures::empty());
 
         let (_sk, pk) = RistrettoPublicKey::random_keypair(&mut rng);
         let node_id = NodeId::from_key(&pk).unwrap();
         let net_address4 = NetAddress::from("9.10.11.12:7000".parse::<NetAddress>().unwrap());
         let net_addresses = NetAddressesWithStats::from(net_address4.clone());
-        let peer2: Peer = Peer::new(
-            pk,
-            node_id,
-            net_addresses,
-            PeerFlags::default(),
-            PeerFeatures::default(),
-        );
+        let peer2: Peer = Peer::new(pk, node_id, net_addresses, PeerFlags::default(), PeerFeatures::empty());
 
         let (_sk, pk) = RistrettoPublicKey::random_keypair(&mut rng);
         let node_id = NodeId::from_key(&pk).unwrap();
@@ -641,13 +635,7 @@ mod test {
         let net_address6 = NetAddress::from("17.18.19.20:8000".parse::<NetAddress>().unwrap());
         let mut net_addresses = NetAddressesWithStats::from(net_address5.clone());
         net_addresses.add_net_address(&net_address6);
-        let peer3 = Peer::new(
-            pk,
-            node_id,
-            net_addresses,
-            PeerFlags::default(),
-            PeerFeatures::default(),
-        );
+        let peer3 = Peer::new(pk, node_id, net_addresses, PeerFlags::default(), PeerFeatures::empty());
 
         // Create new datastore with a peer database
         let database_name = "pm_test_restore"; // Note: every test should have unique database
@@ -663,9 +651,9 @@ mod test {
             assert!(peer_storage.add_peer(peer3.clone()).is_ok());
 
             assert_eq!(peer_storage.peers.size().unwrap(), 3);
-            assert!(peer_storage.find_with_public_key(&peer1.public_key).is_ok());
-            assert!(peer_storage.find_with_public_key(&peer2.public_key).is_ok());
-            assert!(peer_storage.find_with_public_key(&peer3.public_key).is_ok());
+            assert!(peer_storage.find_by_public_key(&peer1.public_key).is_ok());
+            assert!(peer_storage.find_by_public_key(&peer2.public_key).is_ok());
+            assert!(peer_storage.find_by_public_key(&peer3.public_key).is_ok());
         }
         // Restore from existing database
         let datastore = init_datastore(database_name).unwrap();
@@ -674,9 +662,9 @@ mod test {
         let peer_storage = PeerStorage::new(db).unwrap();
 
         assert_eq!(peer_storage.peers.size().unwrap(), 3);
-        assert!(peer_storage.find_with_public_key(&peer1.public_key).is_ok());
-        assert!(peer_storage.find_with_public_key(&peer2.public_key).is_ok());
-        assert!(peer_storage.find_with_public_key(&peer3.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer1.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer2.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer3.public_key).is_ok());
 
         clean_up_datastore(database_name);
     }
@@ -695,25 +683,13 @@ mod test {
         let mut net_addresses = NetAddressesWithStats::from(net_address1.clone());
         net_addresses.add_net_address(&net_address2);
         net_addresses.add_net_address(&net_address3);
-        let peer1 = Peer::new(
-            pk,
-            node_id,
-            net_addresses,
-            PeerFlags::default(),
-            PeerFeatures::default(),
-        );
+        let peer1 = Peer::new(pk, node_id, net_addresses, PeerFlags::default(), PeerFeatures::empty());
 
         let (_sk, pk) = RistrettoPublicKey::random_keypair(&mut rng);
         let node_id = NodeId::from_key(&pk).unwrap();
         let net_address4 = NetAddress::from("9.10.11.12:7000".parse::<NetAddress>().unwrap());
         let net_addresses = NetAddressesWithStats::from(net_address4.clone());
-        let peer2: Peer = Peer::new(
-            pk,
-            node_id,
-            net_addresses,
-            PeerFlags::default(),
-            PeerFeatures::default(),
-        );
+        let peer2: Peer = Peer::new(pk, node_id, net_addresses, PeerFlags::default(), PeerFeatures::empty());
 
         let (_sk, pk) = RistrettoPublicKey::random_keypair(&mut rng);
         let node_id = NodeId::from_key(&pk).unwrap();
@@ -721,13 +697,7 @@ mod test {
         let net_address6 = NetAddress::from("17.18.19.20:8000".parse::<NetAddress>().unwrap());
         let mut net_addresses = NetAddressesWithStats::from(net_address5.clone());
         net_addresses.add_net_address(&net_address6);
-        let peer3 = Peer::new(
-            pk,
-            node_id,
-            net_addresses,
-            PeerFlags::default(),
-            PeerFeatures::default(),
-        );
+        let peer3 = Peer::new(pk, node_id, net_addresses, PeerFlags::default(), PeerFeatures::empty());
         // Test adding and searching for peers
         assert!(peer_storage.add_peer(peer1.clone()).is_ok());
         assert!(peer_storage.add_peer(peer2.clone()).is_ok());
@@ -736,59 +706,59 @@ mod test {
         assert_eq!(peer_storage.peers.len().unwrap(), 3);
 
         assert_eq!(
-            peer_storage.find_with_public_key(&peer1.public_key).unwrap().public_key,
+            peer_storage.find_by_public_key(&peer1.public_key).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_public_key(&peer2.public_key).unwrap().public_key,
+            peer_storage.find_by_public_key(&peer2.public_key).unwrap().public_key,
             peer2.public_key
         );
         assert_eq!(
-            peer_storage.find_with_public_key(&peer3.public_key).unwrap().public_key,
+            peer_storage.find_by_public_key(&peer3.public_key).unwrap().public_key,
             peer3.public_key
         );
 
         assert_eq!(
-            peer_storage.find_with_node_id(&peer1.node_id).unwrap().node_id,
+            peer_storage.find_by_node_id(&peer1.node_id).unwrap().node_id,
             peer1.node_id
         );
         assert_eq!(
-            peer_storage.find_with_node_id(&peer2.node_id).unwrap().node_id,
+            peer_storage.find_by_node_id(&peer2.node_id).unwrap().node_id,
             peer2.node_id
         );
         assert_eq!(
-            peer_storage.find_with_node_id(&peer3.node_id).unwrap().node_id,
+            peer_storage.find_by_node_id(&peer3.node_id).unwrap().node_id,
             peer3.node_id
         );
 
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address1).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address1).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address2).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address2).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address3).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address3).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address4).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address4).unwrap().public_key,
             peer2.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address5).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address5).unwrap().public_key,
             peer3.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address6).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address6).unwrap().public_key,
             peer3.public_key
         );
 
-        assert!(peer_storage.find_with_public_key(&peer1.public_key).is_ok());
-        assert!(peer_storage.find_with_public_key(&peer2.public_key).is_ok());
-        assert!(peer_storage.find_with_public_key(&peer3.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer1.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer2.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer3.public_key).is_ok());
 
         // Test delete of border case peer
         assert!(peer_storage.delete_peer(&peer3.node_id).is_ok());
@@ -796,47 +766,47 @@ mod test {
         assert_eq!(peer_storage.peers.len().unwrap(), 2);
 
         assert_eq!(
-            peer_storage.find_with_public_key(&peer1.public_key).unwrap().public_key,
+            peer_storage.find_by_public_key(&peer1.public_key).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_public_key(&peer2.public_key).unwrap().public_key,
+            peer_storage.find_by_public_key(&peer2.public_key).unwrap().public_key,
             peer2.public_key
         );
-        assert!(peer_storage.find_with_public_key(&peer3.public_key).is_err());
+        assert!(peer_storage.find_by_public_key(&peer3.public_key).is_err());
 
         assert_eq!(
-            peer_storage.find_with_node_id(&peer1.node_id).unwrap().node_id,
+            peer_storage.find_by_node_id(&peer1.node_id).unwrap().node_id,
             peer1.node_id
         );
         assert_eq!(
-            peer_storage.find_with_node_id(&peer2.node_id).unwrap().node_id,
+            peer_storage.find_by_node_id(&peer2.node_id).unwrap().node_id,
             peer2.node_id
         );
-        assert!(peer_storage.find_with_node_id(&peer3.node_id).is_err());
+        assert!(peer_storage.find_by_node_id(&peer3.node_id).is_err());
 
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address1).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address1).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address2).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address2).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address3).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address3).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address4).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address4).unwrap().public_key,
             peer2.public_key
         );
-        assert!(peer_storage.find_with_net_address(&net_address5).is_err());
-        assert!(peer_storage.find_with_net_address(&net_address6).is_err());
+        assert!(peer_storage.find_by_net_address(&net_address5).is_err());
+        assert!(peer_storage.find_by_net_address(&net_address6).is_err());
 
-        assert!(peer_storage.find_with_public_key(&peer1.public_key).is_ok());
-        assert!(peer_storage.find_with_public_key(&peer2.public_key).is_ok());
-        assert!(peer_storage.find_with_public_key(&peer3.public_key).is_err());
+        assert!(peer_storage.find_by_public_key(&peer1.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer2.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer3.public_key).is_err());
 
         // Test of delete with moving behaviour
         assert!(peer_storage.add_peer(peer3.clone()).is_ok());
@@ -845,49 +815,49 @@ mod test {
         assert_eq!(peer_storage.peers.len().unwrap(), 2);
 
         assert_eq!(
-            peer_storage.find_with_public_key(&peer1.public_key).unwrap().public_key,
+            peer_storage.find_by_public_key(&peer1.public_key).unwrap().public_key,
             peer1.public_key
         );
-        assert!(peer_storage.find_with_public_key(&peer2.public_key).is_err());
+        assert!(peer_storage.find_by_public_key(&peer2.public_key).is_err());
         assert_eq!(
-            peer_storage.find_with_public_key(&peer3.public_key).unwrap().public_key,
+            peer_storage.find_by_public_key(&peer3.public_key).unwrap().public_key,
             peer3.public_key
         );
 
         assert_eq!(
-            peer_storage.find_with_node_id(&peer1.node_id).unwrap().node_id,
+            peer_storage.find_by_node_id(&peer1.node_id).unwrap().node_id,
             peer1.node_id
         );
-        assert!(peer_storage.find_with_node_id(&peer2.node_id).is_err());
+        assert!(peer_storage.find_by_node_id(&peer2.node_id).is_err());
         assert_eq!(
-            peer_storage.find_with_node_id(&peer3.node_id).unwrap().node_id,
+            peer_storage.find_by_node_id(&peer3.node_id).unwrap().node_id,
             peer3.node_id
         );
 
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address1).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address1).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address2).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address2).unwrap().public_key,
             peer1.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address3).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address3).unwrap().public_key,
             peer1.public_key
         );
-        assert!(peer_storage.find_with_net_address(&net_address4).is_err());
+        assert!(peer_storage.find_by_net_address(&net_address4).is_err());
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address5).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address5).unwrap().public_key,
             peer3.public_key
         );
         assert_eq!(
-            peer_storage.find_with_net_address(&net_address6).unwrap().public_key,
+            peer_storage.find_by_net_address(&net_address6).unwrap().public_key,
             peer3.public_key
         );
 
-        assert!(peer_storage.find_with_public_key(&peer1.public_key).is_ok());
-        assert!(peer_storage.find_with_public_key(&peer2.public_key).is_err());
-        assert!(peer_storage.find_with_public_key(&peer3.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer1.public_key).is_ok());
+        assert!(peer_storage.find_by_public_key(&peer2.public_key).is_err());
+        assert!(peer_storage.find_by_public_key(&peer3.public_key).is_ok());
     }
 }

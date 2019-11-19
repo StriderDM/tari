@@ -37,7 +37,6 @@ use tari_p2p::{
     comms_connector::{InboundDomainConnector, PeerMessage},
     domain_message::DomainMessage,
     initialization::{initialize_comms, CommsConfig},
-    tari_message::TariMessageType,
 };
 use tempdir::TempDir;
 use tokio::runtime::TaskExecutor;
@@ -46,15 +45,15 @@ pub fn setup_comms_services<TSink>(
     executor: TaskExecutor,
     node_identity: Arc<NodeIdentity>,
     peers: Vec<NodeIdentity>,
-    publisher: InboundDomainConnector<TariMessageType, TSink>,
+    publisher: InboundDomainConnector<TSink>,
 ) -> (CommsNode, Dht)
 where
-    TSink: Sink<Arc<PeerMessage<TariMessageType>>> + Clone + Unpin + Send + Sync + 'static,
+    TSink: Sink<Arc<PeerMessage>> + Clone + Unpin + Send + Sync + 'static,
     TSink::Error: Error + Send + Sync,
 {
     let comms_config = CommsConfig {
         node_identity: Arc::clone(&node_identity),
-        host: "127.0.0.1".parse().unwrap(),
+        peer_connection_listening_address: "127.0.0.1".parse().unwrap(),
         socks_proxy_address: None,
         control_service: ControlServiceConfig {
             listener_address: node_identity.control_service_address(),
@@ -67,6 +66,7 @@ where
             .to_str()
             .unwrap()
             .to_string(),
+        establish_connection_timeout: Duration::from_secs(3),
         peer_database_name: random_string(8),
         inbound_buffer_size: 100,
         outbound_buffer_size: 100,
@@ -77,12 +77,11 @@ where
 
     for p in peers {
         let addr = p.control_service_address();
-        let NodeIdentity { identity, .. } = p;
         comms
             .peer_manager()
             .add_peer(Peer::new(
-                identity.public_key,
-                identity.node_id,
+                p.public_key().clone(),
+                p.node_id().clone(),
                 addr.into(),
                 PeerFlags::empty(),
                 PeerFeatures::empty(),
@@ -101,7 +100,7 @@ pub fn create_dummy_message<T>(inner: T) -> DomainMessage<T> {
         NodeId::from_key(&pk).unwrap(),
         Vec::<NetAddress>::new().into(),
         PeerFlags::empty(),
-        PeerFeatures::communication_node_default(),
+        PeerFeatures::COMMUNICATION_NODE,
     );
     DomainMessage {
         origin_pubkey: peer_source.public_key.clone(),

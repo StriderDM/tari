@@ -20,10 +20,36 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use crate::chain_storage::MmrTree;
 use serde::{Deserialize, Serialize};
+use tari_transactions::types::HashOutput;
+
+/// NodeCommsRequestType is used to specify the amount of peers that need to be queried before a request can be
+/// finalized.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum NodeCommsRequestType {
+    /// Send the request to a single remote base node
+    Single,
+    /// Send the request to a number of remote base nodes and accumulate all the responses.
+    Many,
+}
+
+/// A container for the parameters required for a FetchMmrState request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MmrStateRequest {
+    pub tree: MmrTree,
+    pub index: u64,
+    pub count: u64,
+}
 
 /// API Request enum
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NodeCommsRequest {
     GetChainMetadata,
+    FetchKernels(Vec<HashOutput>),
+    FetchHeaders(Vec<u64>),
+    FetchUtxos(Vec<HashOutput>),
+    FetchBlocks(Vec<u64>),
+    FetchMmrState(MmrStateRequest),
+    GetNewBlock,
 }

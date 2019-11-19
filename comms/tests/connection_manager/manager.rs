@@ -60,7 +60,7 @@ fn establish_peer_connection() {
 
     let node_B_peer = factories::peer::create()
         .with_net_addresses(vec![node_B_control_port_address.clone()])
-        .with_public_key(node_B_identity.identity.public_key.clone())
+        .with_public_key(node_B_identity.public_key().clone())
         .build()
         .unwrap();
 
@@ -127,7 +127,7 @@ fn establish_peer_connection() {
     let node_A_connection_manager_cloned = node_A_connection_manager.clone();
     let handle1 = thread::spawn(move || -> Result<(), String> {
         let to_node_B_conn = node_A_connection_manager_cloned
-            .establish_connection_to_peer(&node_B_peer)
+            .establish_connection_to_node_id(&node_B_peer.node_id)
             .map_err(|err| format!("{:?}", err))?;
         to_node_B_conn.set_linger(Linger::Indefinitely).unwrap();
         to_node_B_conn
@@ -139,7 +139,7 @@ fn establish_peer_connection() {
     let node_A_connection_manager_cloned = node_A_connection_manager.clone();
     let handle2 = thread::spawn(move || -> Result<(), String> {
         let to_node_B_conn = node_A_connection_manager_cloned
-            .establish_connection_to_peer(&node_B_peer_copy)
+            .establish_connection_to_node_id(&node_B_peer_copy.node_id)
             .map_err(|err| format!("{:?}", err))?;
         to_node_B_conn.set_linger(Linger::Indefinitely).unwrap();
         to_node_B_conn
@@ -148,19 +148,19 @@ fn establish_peer_connection() {
         Ok(())
     });
 
-    handle1.timeout_join(Duration::from_millis(2000)).unwrap();
-    handle2.timeout_join(Duration::from_millis(2000)).unwrap();
+    handle1.timeout_join(Duration::from_millis(5000)).unwrap();
+    handle2.timeout_join(Duration::from_millis(5000)).unwrap();
 
     // Give the peer connections a moment to receive and the message sink connections to send
     pause();
 
     node_B_control_service.shutdown().unwrap();
     node_B_control_service
-        .timeout_join(Duration::from_millis(1000))
+        .timeout_join(Duration::from_millis(5000))
         .unwrap();
 
     assert_eq!(node_A_connection_manager.get_active_connection_count(), 1);
-    let (_, _items) = stream_assert_count(consumer_rx_b, 2, 2000).unwrap();
+    let (_, _items) = stream_assert_count(consumer_rx_b, 2, 5000).unwrap();
 
     match Arc::try_unwrap(node_A_connection_manager) {
         Ok(manager) => manager.shutdown().into_iter().map(|r| r.unwrap()).collect::<Vec<()>>(),

@@ -30,13 +30,16 @@ use crate::{
         HistoricalBlock,
     },
     proof_of_work::Difficulty,
-    transaction::{TransactionInput, TransactionKernel, TransactionOutput},
-    types::{Commitment, HashOutput},
 };
 use croaring::Bitmap;
 use log::*;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
-use tari_mmr::{Hash, MerkleCheckPoint, MerkleProof};
+use tari_mmr::{Hash, MerkleCheckPoint, MerkleProof, MutableMmrLeafNodes};
+use tari_transactions::{
+    transaction::{TransactionInput, TransactionKernel, TransactionOutput},
+    types::{Commitment, HashOutput},
+};
 use tari_utilities::{hex::Hex, Hashable};
 
 const LOG_TARGET: &str = "core::chain_storage::database";
@@ -47,6 +50,13 @@ pub enum BlockAddResult {
     BlockExists,
     OrphanBlock,
     ChainReorg,
+}
+
+/// MutableMmrState provides the total number of leaf nodes in the base MMR and the requested leaf nodes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MutableMmrState {
+    pub total_leaf_count: usize,
+    pub leaf_nodes: MutableMmrLeafNodes,
 }
 
 /// Identify behaviour for Blockchain database back ends. Implementations must support `Send` and `Sync` so that
@@ -82,6 +92,15 @@ pub trait BlockchainBackend: Send + Sync {
     fn fetch_mmr_checkpoint(&self, tree: MmrTree, index: u64) -> Result<MerkleCheckPoint, ChainStorageError>;
     /// Fetches the leaf node hash and its deletion status for the nth leaf node in the given MMR tree.
     fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Hash, bool), ChainStorageError>;
+    /// Fetches the MMR base state of the specified tree.
+    fn fetch_mmr_base_leaf_nodes(
+        &self,
+        tree: MmrTree,
+        index: usize,
+        count: usize,
+    ) -> Result<MutableMmrState, ChainStorageError>;
+    /// Resets and restores the state of the specified MMR tree using a set of leaf nodes.
+    fn restore_mmr(&self, tree: MmrTree, base_state: MutableMmrLeafNodes) -> Result<(), ChainStorageError>;
     /// Performs the function F for each orphan block in the orphan pool.
     fn for_each_orphan<F>(&self, f: F) -> Result<(), ChainStorageError>
     where
@@ -128,10 +147,8 @@ macro_rules! fetch {
 /// provide it with the backend it is going to use; for example, for a memory-backed DB:
 ///
 /// ```
-/// use tari_core::{
-///     chain_storage::{BlockchainDatabase, MemoryDatabase},
-///     types::HashDigest,
-/// };
+/// use tari_core::chain_storage::{BlockchainDatabase, MemoryDatabase};
+/// use tari_transactions::types::HashDigest;
 /// let db_backend = MemoryDatabase::<HashDigest>::default();
 /// let mut db = BlockchainDatabase::new(db_backend).unwrap();
 /// // Do stuff with db
@@ -311,6 +328,22 @@ where T: BlockchainBackend
         self.db.fetch_mmr_proof(tree, pos)
     }
 
+    /// Fetches the MMR base state of the specified tree
+    pub fn fetch_mmr_base_leaf_nodes(
+        &self,
+        tree: MmrTree,
+        index: usize,
+        count: usize,
+    ) -> Result<MutableMmrState, ChainStorageError>
+    {
+        self.db.fetch_mmr_base_leaf_nodes(tree, index, count)
+    }
+
+    /// Resets the specified MMR and restores it with the provided state.
+    pub fn restore_mmr(&self, tree: MmrTree, base_state: MutableMmrLeafNodes) -> Result<(), ChainStorageError> {
+        self.db.restore_mmr(tree, base_state)
+    }
+
     /// Add a block to the longest chain. This function does some basic checks to maintain the chain integrity, but
     /// does not perform a full block validation (this should have been done by this point).
     ///
@@ -449,8 +482,9 @@ where T: BlockchainBackend
     pub fn is_new_best_block(&self, block: &Block) -> Result<bool, ChainStorageError> {
         let (height, parent_hash) = {
             let db = self.access_metadata()?;
+            // If the database is empty, the best block must be the genesis block
             if db.height_of_longest_chain.is_none() {
-                return Ok(true);
+                return Ok(block.header.height == 0);
             }
             (
                 db.height_of_longest_chain.clone().unwrap(),

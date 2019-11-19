@@ -23,11 +23,11 @@
 use super::node_id::deserialize_node_id_from_hex;
 use crate::{
     connection::{net_address::net_addresses::NetAddressesWithStats, NetAddress},
-    peer_manager::{node_id::NodeId, PeerFeature, PeerFeatures},
+    peer_manager::{connection_stats::PeerConnectionStats, node_id::NodeId, PeerFeatures},
     types::CommsPublicKey,
 };
-use bitflags::*;
-use chrono::prelude::*;
+use bitflags::bitflags;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tari_utilities::hex::serialize_to_hex;
 
@@ -50,7 +50,8 @@ pub struct Peer {
     pub addresses: NetAddressesWithStats,
     pub flags: PeerFlags,
     pub features: PeerFeatures,
-    // TODO reputation metric?
+    pub connection_stats: PeerConnectionStats,
+    pub added_at: NaiveDateTime,
 }
 
 impl Peer {
@@ -69,6 +70,8 @@ impl Peer {
             addresses,
             flags,
             features,
+            connection_stats: Default::default(),
+            added_at: Utc::now().naive_utc(),
         }
     }
 
@@ -78,6 +81,7 @@ impl Peer {
         net_addresses: Option<Vec<NetAddress>>,
         flags: Option<PeerFlags>,
         features: Option<PeerFeatures>,
+        connection_stats: Option<PeerConnectionStats>,
     )
     {
         if let Some(new_node_id) = node_id {
@@ -92,6 +96,9 @@ impl Peer {
         if let Some(new_features) = features {
             self.features = new_features;
         }
+        if let Some(connection_stats) = connection_stats {
+            self.connection_stats = connection_stats;
+        }
     }
 
     /// Provides that date time of the last successful interaction with the peer
@@ -100,8 +107,8 @@ impl Peer {
     }
 
     /// Returns true if this peer has the given feature, otherwise false
-    pub fn has_feature(&self, feature: &PeerFeature) -> bool {
-        self.features.contains(feature)
+    pub fn has_features(&self, features: PeerFeatures) -> bool {
+        self.features.contains(features)
     }
 
     /// Returns the ban status of the peer
@@ -120,7 +127,7 @@ mod test {
     use super::*;
     use crate::{
         connection::{net_address::net_addresses::NetAddressesWithStats, NetAddress},
-        peer_manager::{node_id::NodeId, peer_features::PeerFeature},
+        peer_manager::node_id::NodeId,
         types::CommsPublicKey,
     };
     use serde_json::Value;
@@ -133,7 +140,7 @@ mod test {
         let (_sk, pk) = RistrettoPublicKey::random_keypair(&mut rng);
         let node_id = NodeId::from_key(&pk).unwrap();
         let addresses = NetAddressesWithStats::from("123.0.0.123:8000".parse::<NetAddress>().unwrap());
-        let mut peer: Peer = Peer::new(pk, node_id, addresses, PeerFlags::default(), PeerFeatures::default());
+        let mut peer: Peer = Peer::new(pk, node_id, addresses, PeerFlags::default(), PeerFeatures::empty());
         assert_eq!(peer.is_banned(), false);
         peer.set_banned(true);
         assert_eq!(peer.is_banned(), true);
@@ -164,7 +171,8 @@ mod test {
             Some(node_id2.clone()),
             Some(vec![net_address2.clone(), net_address3.clone()]),
             Some(PeerFlags::BANNED),
-            Some([PeerFeature::MessagePropagation].into()),
+            Some(PeerFeatures::MESSAGE_PROPAGATION),
+            Some(PeerConnectionStats::new()),
         );
 
         assert_eq!(peer.public_key, public_key1);
@@ -185,7 +193,7 @@ mod test {
             .iter()
             .any(|net_address_with_stats| net_address_with_stats.net_address == net_address3));
         assert_eq!(peer.flags, PeerFlags::BANNED);
-        assert_eq!(peer.has_feature(&PeerFeature::MessagePropagation), true);
+        assert_eq!(peer.has_features(PeerFeatures::MESSAGE_PROPAGATION), true);
     }
 
     #[test]
@@ -199,7 +207,7 @@ mod test {
             node_id,
             "127.0.0.1:9000".parse::<NetAddress>().unwrap().into(),
             PeerFlags::empty(),
-            PeerFeatures::default(),
+            PeerFeatures::empty(),
         );
 
         let json = peer.to_json().unwrap();

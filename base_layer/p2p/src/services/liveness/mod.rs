@@ -35,21 +35,22 @@
 //! [LivenessRequest]: ./messages/enum.LivenessRequets.html
 //! [PingPong]: ./messages/enum.PingPong.html
 
+mod config;
 pub mod error;
 pub mod handle;
+mod message;
 mod service;
 mod state;
 
-pub use self::handle::{LivenessRequest, LivenessResponse, PingPong};
-use self::{service::LivenessService, state::LivenessState};
+use self::{message::PingPongMessage, service::LivenessService, state::LivenessState};
 use crate::{
     comms_connector::PeerMessage,
     domain_message::DomainMessage,
     services::{
         liveness::handle::LivenessHandle,
-        utils::{map_deserialized, ok_or_skip_result},
+        utils::{map_decode, ok_or_skip_result},
     },
-    tari_message::{NetMessage, TariMessageType},
+    tari_message::TariMessageType,
 };
 use futures::{future, Future, Stream, StreamExt};
 use log::*;
@@ -66,32 +67,42 @@ use tari_service_framework::{
 use tari_shutdown::ShutdownSignal;
 use tokio::runtime::TaskExecutor;
 
+// Public exports
+pub use self::{
+    config::LivenessConfig,
+    handle::{LivenessRequest, LivenessResponse},
+};
+use tari_comms_dht::DhtRequester;
+
 const LOG_TARGET: &'static str = "p2p::services::liveness";
 
 /// Initializer for the Liveness service handle and service future.
 pub struct LivenessInitializer {
-    inbound_message_subscription_factory:
-        Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage<TariMessageType>>>>,
+    config: Option<LivenessConfig>,
+    inbound_message_subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+    dht_requester: Option<DhtRequester>,
 }
 
 impl LivenessInitializer {
     /// Create a new LivenessInitializer from the inbound message subscriber
     pub fn new(
-        inbound_message_subscription_factory: Arc<
-            TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage<TariMessageType>>>,
-        >,
+        config: LivenessConfig,
+        inbound_message_subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+        dht_requester: DhtRequester,
     ) -> Self
     {
         Self {
+            config: Some(config),
             inbound_message_subscription_factory,
+            dht_requester: Some(dht_requester),
         }
     }
 
     /// Get a stream of inbound PingPong messages
-    fn ping_stream(&self) -> impl Stream<Item = DomainMessage<PingPong>> {
+    fn ping_stream(&self) -> impl Stream<Item = DomainMessage<PingPongMessage>> {
         self.inbound_message_subscription_factory
-            .get_subscription(TariMessageType::new(NetMessage::PingPong))
-            .map(map_deserialized::<PingPong>)
+            .get_subscription(TariMessageType::PingPong)
+            .map(map_decode::<PingPongMessage>)
             .filter_map(ok_or_skip_result)
     }
 }
@@ -112,12 +123,24 @@ impl ServiceInitializer for LivenessInitializer {
 
         let liveness_handle = LivenessHandle::new(sender, subscriber);
 
+        // Saving a clone
+        let config = self
+            .config
+            .take()
+            .expect("Liveness service initialized more than once.");
+
+        let mut dht_requester = self
+            .dht_requester
+            .take()
+            .expect("Liveness service initialized more than once.");
+
         // Register handle before waiting for handles to be ready
         handles_fut.register(liveness_handle);
 
         // Create a stream which receives PingPong messages from comms
         let ping_stream = self.ping_stream();
 
+        // Spawn the Liveness service on the executor
         executor.spawn(async move {
             // Wait for all handles to become available
             let handles = handles_fut.await;
@@ -126,12 +149,52 @@ impl ServiceInitializer for LivenessInitializer {
                 .get_handle::<OutboundMessageRequester>()
                 .expect("Liveness service requires CommsOutbound service handle");
 
-            let state = Arc::new(LivenessState::new());
+            if config.enable_auto_join {
+                match dht_requester.send_join().await {
+                    Ok(_) => {
+                        trace!(target: LOG_TARGET, "Join message has been sent to closest peers",);
+                    },
+                    Err(err) => {
+                        error!(
+                            target: LOG_TARGET,
+                            "Failed to send join message on startup because '{}'", err
+                        );
+                    },
+                }
+            }
 
-            // Spawn the Liveness service on the executor
-            let service = LivenessService::new(receiver, ping_stream, state, outbound_handle, publisher).run();
-            futures::pin_mut!(service);
-            future::select(service, shutdown).await;
+            if config.enable_auto_stored_message_request {
+                // TODO: Record when store message request was last requested
+                //       and request messages from after that time
+                match dht_requester.send_request_stored_messages().await {
+                    Ok(_) => {
+                        trace!(
+                            target: LOG_TARGET,
+                            "Stored message request has been sent to closest peers",
+                        );
+                    },
+                    Err(err) => {
+                        error!(
+                            target: LOG_TARGET,
+                            "Failed to send stored message on startup because '{}'", err
+                        );
+                    },
+                }
+            }
+
+            let state = LivenessState::new();
+
+            let service = LivenessService::new(
+                config,
+                receiver,
+                ping_stream,
+                state,
+                dht_requester,
+                outbound_handle,
+                publisher,
+                shutdown,
+            );
+            service.run().await;
             debug!(target: LOG_TARGET, "Liveness service has shut down");
         });
 

@@ -30,14 +30,14 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tari_core::{
-    tari_amount::MicroTari,
-    transaction::{OutputFeatures, TransactionInput, UnblindedOutput},
-    types::{PrivateKey, PublicKey, COMMITMENT_FACTORY},
-};
 use tari_crypto::{
     commitment::HomomorphicCommitmentFactory,
     keys::{PublicKey as PublicKeyTrait, SecretKey as SecretKeyTrait},
+};
+use tari_transactions::{
+    tari_amount::MicroTari,
+    transaction::{OutputFeatures, TransactionInput, UnblindedOutput},
+    types::{PrivateKey, PublicKey, COMMITMENT_FACTORY},
 };
 
 pub fn assert_change<F, T>(mut func: F, to: T, poll_count: usize)
@@ -105,7 +105,6 @@ pub struct TestParams {
     pub nonce: PrivateKey,
     pub public_nonce: PublicKey,
 }
-
 impl TestParams {
     pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> TestParams {
         let r = PrivateKey::random(rng);
@@ -118,7 +117,6 @@ impl TestParams {
         }
     }
 }
-
 pub fn make_input<R: Rng + CryptoRng>(rng: &mut R, val: MicroTari) -> (TransactionInput, UnblindedOutput) {
     let key = PrivateKey::random(rng);
     let commitment = COMMITMENT_FACTORY.commit_value(&key, val.into());

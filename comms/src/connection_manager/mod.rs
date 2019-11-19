@@ -58,7 +58,7 @@
 //! # use tari_storage::LMDBWrapper;
 //! # use futures::channel::mpsc::channel;
 //!
-//! let node_identity = Arc::new(NodeIdentity::random(&mut OsRng::new().unwrap(), "127.0.0.1:9000".parse().unwrap(), PeerFeatures::communication_node_default()).unwrap());
+//! let node_identity = Arc::new(NodeIdentity::random(&mut OsRng::new().unwrap(), "127.0.0.1:9000".parse().unwrap(), PeerFeatures::COMMUNICATION_NODE).unwrap());
 //!
 //! let context = ZmqContext::new();
 //!
@@ -97,6 +97,7 @@
 //! [ConnectionEstablisher]: ./establisher/struct.ConnectionEstablisher.html
 pub mod actor;
 mod connections;
+mod connectivity;
 mod dialer;
 mod error;
 pub mod establisher;
@@ -108,6 +109,7 @@ mod types;
 pub(crate) use self::types::EstablishLockResult;
 pub use self::{
     actor::{create as create_connection_manager_actor, ConnectionManagerRequester},
+    connectivity::Connectivity,
     dialer::Dialer,
     error::ConnectionManagerError,
     establisher::PeerConnectionConfig,

@@ -23,40 +23,21 @@
 use crate::{
     blocks::Block,
     chain_storage::{async_db, BlockAddResult, BlockchainDatabase, MemoryDatabase, MmrTree},
-    tari_amount::T,
     test_utils::{
         builders::{chain_block, create_test_block, schema_to_transaction},
         sample_blockchains::{create_blockchain_db_no_cut_through, create_new_blockchain},
     },
-    transaction::{TransactionOutput, UnblindedOutput},
     txn_schema,
+};
+use std::{fs::File, io::Write, ops::Deref};
+use tari_crypto::commitment::HomomorphicCommitmentFactory;
+use tari_test_utils::runtime::test_async;
+use tari_transactions::{
+    tari_amount::T,
+    transaction::{TransactionOutput, UnblindedOutput},
     types::{HashDigest, COMMITMENT_FACTORY},
 };
-use bitflags::_core::sync::atomic::{AtomicBool, Ordering};
-use std::{fs::File, io::Write, ops::Deref, sync::Arc};
-use tari_crypto::commitment::HomomorphicCommitmentFactory;
 use tari_utilities::{hex::Hex, Hashable};
-use tokio::{self, runtime::Runtime};
-
-fn create_runtime(passed: Arc<AtomicBool>) -> Runtime {
-    let rt = tokio::runtime::Builder::new()
-        .blocking_threads(4)
-        // Run the work scheduler on one thread so we can really see the effects of using `blocking` above
-        .core_threads(1)
-        .panic_handler(move |_| { passed.store(false, Ordering::SeqCst) })
-        .build()
-        .expect("Could not create runtime");
-    rt
-}
-
-fn test_async<F>(f: F)
-where F: FnOnce(&Runtime) {
-    let passed = Arc::new(AtomicBool::new(true));
-    let rt = create_runtime(passed.clone());
-    f(&rt);
-    rt.shutdown_on_idle();
-    assert!(passed.load(Ordering::SeqCst));
-}
 
 fn write_logs(db: &BlockchainDatabase<MemoryDatabase<HashDigest>>, blocks: &[Block]) -> Result<(), std::io::Error> {
     {

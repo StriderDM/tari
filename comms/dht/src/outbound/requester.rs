@@ -20,23 +20,27 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use super::{broadcast_strategy::BroadcastStrategy, message::DhtOutboundRequest};
+use super::message::DhtOutboundRequest;
 use crate::{
-    envelope::{DhtHeader, DhtMessageFlags, DhtMessageType, NodeDestination},
+    broadcast_strategy::BroadcastStrategy,
+    domain_message::OutboundDomainMessage,
+    envelope::{DhtMessageFlags, DhtMessageHeader, NodeDestination},
     outbound::{
         message::{ForwardRequest, OutboundEncryption, SendMessageRequest},
         DhtOutboundError,
     },
+    proto::envelope::DhtMessageType,
 };
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use tari_comms::{
-    message::{Frame, Message, MessageFlags, MessageHeader},
+    message::{Frame, MessageExt, MessageFlags},
+    peer_manager::NodeId,
     types::CommsPublicKey,
+    wrap_in_envelope_body,
 };
-use tari_utilities::message_format::MessageFormat;
 
 #[derive(Clone)]
 pub struct OutboundMessageRequester {
@@ -49,22 +53,42 @@ impl OutboundMessageRequester {
     }
 
     /// Send directly to a peer.
-    pub async fn send_direct<T, MType>(
+    pub async fn send_direct<T>(
         &mut self,
         dest_public_key: CommsPublicKey,
         encryption: OutboundEncryption,
-        message_type: MType,
-        message: T,
+        message: OutboundDomainMessage<T>,
     ) -> Result<bool, DhtOutboundError>
     where
-        MessageHeader<MType>: MessageFormat,
-        T: MessageFormat,
+        T: prost::Message,
     {
         self.send_message(
             BroadcastStrategy::DirectPublicKey(dest_public_key.clone()),
             NodeDestination::PublicKey(dest_public_key),
             encryption,
-            message_type,
+            message,
+        )
+        .await
+        .map(|count| {
+            debug_assert!(count <= 1);
+            count >= 1
+        })
+    }
+
+    /// Send directly to a peer.
+    pub async fn send_direct_node_id<T>(
+        &mut self,
+        dest_node_id: NodeId,
+        encryption: OutboundEncryption,
+        message: OutboundDomainMessage<T>,
+    ) -> Result<bool, DhtOutboundError>
+    where
+        T: prost::Message,
+    {
+        self.send_message(
+            BroadcastStrategy::DirectNodeId(dest_node_id.clone()),
+            NodeDestination::NodeId(dest_node_id),
+            encryption,
             message,
         )
         .await
@@ -77,48 +101,37 @@ impl OutboundMessageRequester {
     /// Send to a pre-configured number of closest peers.
     ///
     /// Each message is destined for each peer.
-    pub async fn send_direct_neighbours<T, MType>(
+    pub async fn send_direct_neighbours<T>(
         &mut self,
         encryption: OutboundEncryption,
         exclude_peers: Vec<CommsPublicKey>,
-        message_type: MType,
-        message: T,
+        message: OutboundDomainMessage<T>,
     ) -> Result<usize, DhtOutboundError>
     where
-        MessageHeader<MType>: MessageFormat,
-        T: MessageFormat,
+        T: prost::Message,
     {
-        self.propagate(
-            NodeDestination::Unspecified,
-            encryption,
-            exclude_peers,
-            message_type,
-            message,
-        )
-        .await
+        self.propagate(NodeDestination::Unknown, encryption, exclude_peers, message)
+            .await
     }
 
     /// Send to a pre-configured number of closest peers, for further message propagation.
     ///
     /// Optionally, the NodeDestination can be set to propagate to a particular peer, or network region
     /// in addition to each peer directly (Same as send_direct_neighbours).
-    pub async fn propagate<T, MType>(
+    pub async fn propagate<T>(
         &mut self,
         destination: NodeDestination,
         encryption: OutboundEncryption,
         exclude_peers: Vec<CommsPublicKey>,
-        message_type: MType,
-        message: T,
+        message: OutboundDomainMessage<T>,
     ) -> Result<usize, DhtOutboundError>
     where
-        MessageHeader<MType>: MessageFormat,
-        T: MessageFormat,
+        T: prost::Message,
     {
         self.send_message(
-            BroadcastStrategy::Neighbours(Box::new(exclude_peers)),
+            BroadcastStrategy::Neighbours(exclude_peers),
             destination,
             encryption,
-            message_type,
             message,
         )
         .await
@@ -128,59 +141,47 @@ impl OutboundMessageRequester {
     ///
     /// This should be used with caution as, depending on the number of known peers, a lot of network
     /// traffic could be generated from this node.
-    pub async fn send_flood<T, MType>(
+    pub async fn send_flood<T>(
         &mut self,
         destination: NodeDestination,
         encryption: OutboundEncryption,
-        message_type: MType,
-        message: T,
+        message: OutboundDomainMessage<T>,
     ) -> Result<usize, DhtOutboundError>
     where
-        MessageHeader<MType>: MessageFormat,
-        T: MessageFormat,
+        T: prost::Message,
     {
-        self.send_message(BroadcastStrategy::Flood, destination, encryption, message_type, message)
+        self.send_message(BroadcastStrategy::Flood, destination, encryption, message)
             .await
     }
 
     /// Send to a random subset of peers of size _n_.
-    pub async fn send_random<T, MType>(
+    pub async fn send_random<T>(
         &mut self,
         n: usize,
         destination: NodeDestination,
         encryption: OutboundEncryption,
-        message_type: MType,
-        message: T,
+        message: OutboundDomainMessage<T>,
     ) -> Result<usize, DhtOutboundError>
     where
-        MessageHeader<MType>: MessageFormat,
-        T: MessageFormat,
+        T: prost::Message,
     {
-        self.send_message(
-            BroadcastStrategy::Random(n),
-            destination,
-            encryption,
-            message_type,
-            message,
-        )
-        .await
+        self.send_message(BroadcastStrategy::Random(n), destination, encryption, message)
+            .await
     }
 
     /// Send a message with custom parameters
-    pub async fn send_message<T, MType>(
+    pub async fn send_message<T>(
         &mut self,
         broadcast_strategy: BroadcastStrategy,
         destination: NodeDestination,
         encryption: OutboundEncryption,
-        message_type: MType,
-        message: T,
+        message: OutboundDomainMessage<T>,
     ) -> Result<usize, DhtOutboundError>
     where
-        MessageHeader<MType>: MessageFormat,
-        T: MessageFormat,
+        T: prost::Message,
     {
         let flags = encryption.flags();
-        let body = serialize_message(message_type, message)?;
+        let body = wrap_in_envelope_body!(message.to_header(), message.into_inner())?.to_encoded_bytes()?;
         self.send(
             broadcast_strategy,
             destination,
@@ -202,11 +203,10 @@ impl OutboundMessageRequester {
         message: T,
     ) -> Result<usize, DhtOutboundError>
     where
-        T: MessageFormat,
+        T: prost::Message,
     {
         let flags = encryption.flags();
-        // DHT has the message type in the DhtHeader, so no need to duplicate it in the Message wrapper.
-        let body = serialize_message((), message)?;
+        let body = wrap_in_envelope_body!(message)?.to_encoded_bytes()?;
         self.send(broadcast_strategy, destination, encryption, flags, message_type, body)
             .await
     }
@@ -250,7 +250,7 @@ impl OutboundMessageRequester {
     pub async fn forward_message(
         &mut self,
         broadcast_strategy: BroadcastStrategy,
-        dht_header: DhtHeader,
+        dht_header: DhtMessageHeader,
         body: Vec<u8>,
     ) -> Result<(), DhtOutboundError>
     {
@@ -264,15 +264,4 @@ impl OutboundMessageRequester {
             .await
             .map_err(Into::into)
     }
-}
-
-fn serialize_message<T, MType>(message_type: MType, message: T) -> Result<Vec<u8>, DhtOutboundError>
-where
-    T: MessageFormat,
-    MessageHeader<MType>: MessageFormat,
-{
-    let header = MessageHeader::new(message_type)?;
-    let msg = Message::from_message_format(header, message)?;
-
-    msg.to_binary().map_err(Into::into)
 }

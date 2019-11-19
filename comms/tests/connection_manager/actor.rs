@@ -57,7 +57,6 @@ fn with_alice_and_bob(cb: impl FnOnce(CommsTestNode, CommsTestNode)) {
     let alice_identity = Arc::new(factories::node_identity::create().build().unwrap());
 
     //---------------------------------- Node B Setup --------------------------------------------//
-
     let bob_control_port_address = factories::net_address::create().build().unwrap();
     let bob_identity = Arc::new(
         factories::node_identity::create()
@@ -68,8 +67,8 @@ fn with_alice_and_bob(cb: impl FnOnce(CommsTestNode, CommsTestNode)) {
 
     let bob_peer = factories::peer::create()
         .with_net_addresses(vec![bob_control_port_address.clone()])
-        .with_public_key(bob_identity.identity.public_key.clone())
-        .with_node_id(bob_identity.identity.node_id.clone())
+        .with_public_key(bob_identity.public_key().clone())
+        .with_node_id(bob_identity.node_id().clone())
         .build()
         .unwrap();
 
@@ -138,8 +137,8 @@ fn with_alice_and_bob(cb: impl FnOnce(CommsTestNode, CommsTestNode)) {
 
     let alice_peer = factories::peer::create()
         .with_net_addresses(vec![alice_control_port_address])
-        .with_public_key(alice_identity.identity.public_key.clone())
-        .with_node_id(alice_identity.identity.node_id.clone())
+        .with_public_key(alice_identity.public_key().clone())
+        .with_node_id(alice_identity.node_id().clone())
         .build()
         .unwrap();
 
@@ -191,9 +190,12 @@ fn establish_connection_simple() {
         rt.spawn(service.start());
 
         let conn = rt
-            .block_on(requester.dial_node(bob.node_identity.identity.node_id.clone()))
+            .block_on(requester.dial_node(bob.node_identity.node_id().clone()))
             .unwrap();
+
         assert!(conn.is_active());
+        let n = rt.block_on(requester.get_active_connection_count()).unwrap();
+        assert_eq!(n, 1);
     })
 }
 
@@ -217,8 +219,8 @@ fn establish_connection_simultaneous_connect() {
         bob.peer_manager.add_peer(alice.peer.clone()).unwrap();
         rt.spawn(service.start());
 
-        let alice_node_id = alice.node_identity.identity.node_id.clone();
-        let bob_node_id = bob.node_identity.identity.node_id.clone();
+        let alice_node_id = alice.node_identity.node_id().clone();
+        let bob_node_id = bob.node_identity.node_id().clone();
 
         let mut attempt_count = 0;
         loop {
@@ -246,8 +248,8 @@ fn establish_connection_simultaneous_connect() {
                 },
                 (Err(err_a), Err(err_b)) => panic!("Alice error: {:?}, Bob error: {:?}", err_a, err_b),
                 (Ok(_), Ok(_)) if attempt_count < 10 => {
-                    alice.connection_manager.disconnect_peer(&bob.peer).unwrap();
-                    bob.connection_manager.disconnect_peer(&alice.peer).unwrap();
+                    alice.connection_manager.disconnect_peer(&bob.peer.node_id).unwrap();
+                    bob.connection_manager.disconnect_peer(&alice.peer.node_id).unwrap();
                     attempt_count += 1;
                 },
                 // We we're unable to get a connection conflict this time, so this test didn't exactly fail

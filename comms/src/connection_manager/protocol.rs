@@ -23,11 +23,12 @@
 use super::{establisher::ConnectionEstablisher, types::PeerConnectionJoinHandle, ConnectionManagerError, Result};
 use crate::{
     connection::{CurvePublicKey, NetAddress, PeerConnection},
-    control_service::messages::ConnectRequestOutcome,
+    control_service::messages::{RejectReason, RequestConnectionOutcome},
     peer_manager::{NodeIdentity, Peer},
 };
 use log::*;
 use std::sync::Arc;
+use tari_utilities::byte_array::ByteArray;
 
 const LOG_TARGET: &str = "comms::connection_manager::protocol";
 
@@ -61,7 +62,7 @@ impl<'e, 'ni> PeerConnectionProtocol<'e, 'ni> {
         control_client
             .send_request_connection(
                 self.node_identity.control_service_address(),
-                self.node_identity.identity.node_id.clone(),
+                self.node_identity.node_id().clone(),
                 self.node_identity.features().clone(),
             )
             .map_err(|err| ConnectionManagerError::SendRequestConnectionFailed(format!("{:?}", err)))?;
@@ -78,32 +79,45 @@ impl<'e, 'ni> PeerConnectionProtocol<'e, 'ni> {
             .map_err(|_| ConnectionManagerError::ConnectionRequestOutcomeRecvFail)?
             // Abort! Did not receive a connection outcome before the timeout
             .ok_or(ConnectionManagerError::ConnectionRequestOutcomeTimeout)
-            .and_then(|msg| match msg {
-                ConnectRequestOutcome::Accepted {
-                    curve_public_key,
-                    address,
-                } => {
+            .and_then(|msg: RequestConnectionOutcome| match msg.accepted {
+                true => {
+                    let RequestConnectionOutcome {
+                        curve_public_key,
+                        address,
+                        ..
+                    } = msg;
+
+                    let address = address.parse()?;
+
                     info!(
                         target: LOG_TARGET,
                         "[NodeId={}] RequestConnection accepted by destination peer's control port", peer.node_id
                     );
 
                     // Connect to the requested peer connection and send a identify frame
+                    let curve_public_key = CurvePublicKey::from_bytes(&curve_public_key).map_err(|_| ConnectionManagerError::InvalidCurvePublicKey)?;
                     let (new_peer_conn, join_handle) =
                         self.establish_requested_peer_connection(peer, curve_public_key, address)?;
 
                     Ok((new_peer_conn, join_handle))
                 },
-                ConnectRequestOutcome::Rejected(reason) => {
+                false => {
+                    let RequestConnectionOutcome {
+                        reject_reason,
+                        ..
+                    } = msg;
+
+                    let reject_reason = RejectReason::from_i32(reject_reason).unwrap_or(RejectReason::None);
+
                     info!(
                         target: LOG_TARGET,
                         "[NodeId={}] RequestConnection REJECTED by destination peer's control port. Reason: {}",
                         peer.node_id,
-                        reason
+                        reject_reason
                     );
 
                     // Abort! The connection request was rejected
-                    Err(ConnectionManagerError::ConnectionRejected(reason))
+                    Err(ConnectionManagerError::ConnectionRejected(reject_reason))
                 },
             })
     }

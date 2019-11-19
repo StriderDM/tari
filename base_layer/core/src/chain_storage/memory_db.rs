@@ -25,7 +25,7 @@
 use crate::{
     blocks::{Block, BlockHeader},
     chain_storage::{
-        blockchain_database::BlockchainBackend,
+        blockchain_database::{BlockchainBackend, MutableMmrState},
         db_transaction::{
             DbKey,
             DbKeyValuePair,
@@ -38,15 +38,25 @@ use crate::{
         },
         error::ChainStorageError,
     },
-    transaction::{TransactionKernel, TransactionOutput},
-    types::HashOutput,
 };
 use digest::Digest;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
-use tari_mmr::{Hash as MmrHash, MerkleChangeTracker, MerkleCheckPoint, MerkleProof, MutableMmr};
+use tari_mmr::{
+    Hash as MmrHash,
+    MerkleChangeTracker,
+    MerkleChangeTrackerConfig,
+    MerkleCheckPoint,
+    MerkleProof,
+    MutableMmr,
+    MutableMmrLeafNodes,
+};
+use tari_transactions::{
+    transaction::{TransactionKernel, TransactionOutput},
+    types::HashOutput,
+};
 use tari_utilities::hash::Hashable;
 
 /// A generic struct for storing node objects in the BlockchainDB that also form part of an MMR. The index field makes
@@ -87,6 +97,31 @@ where D: Digest
 impl<D> MemoryDatabase<D>
 where D: Digest
 {
+    pub fn new(mct_config: MerkleChangeTrackerConfig) -> Self {
+        let utxo_mmr =
+            MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new(), mct_config).unwrap();
+        let header_mmr =
+            MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new(), mct_config).unwrap();
+        let kernel_mmr =
+            MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new(), mct_config).unwrap();
+        let range_proof_mmr =
+            MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new(), mct_config).unwrap();
+        Self {
+            db: Arc::new(RwLock::new(InnerDatabase {
+                headers: HashMap::default(),
+                block_hashes: HashMap::default(),
+                utxos: HashMap::default(),
+                stxos: HashMap::default(),
+                kernels: HashMap::default(),
+                orphans: HashMap::default(),
+                utxo_mmr,
+                header_mmr,
+                kernel_mmr,
+                range_proof_mmr,
+            })),
+        }
+    }
+
     pub(self) fn db_access(&self) -> Result<RwLockReadGuard<InnerDatabase<D>>, ChainStorageError> {
         self.db
             .read()
@@ -316,6 +351,49 @@ where D: Digest + Send + Sync
         Ok((hash, deleted))
     }
 
+    fn fetch_mmr_base_leaf_nodes(
+        &self,
+        tree: MmrTree,
+        index: usize,
+        count: usize,
+    ) -> Result<MutableMmrState, ChainStorageError>
+    {
+        let db = self.db_access()?;
+        let mmr_state = match tree {
+            MmrTree::Kernel => MutableMmrState {
+                total_leaf_count: db.kernel_mmr.get_base_leaf_count(),
+                leaf_nodes: db.kernel_mmr.to_base_leaf_nodes(index, count)?,
+            },
+            MmrTree::Header => MutableMmrState {
+                total_leaf_count: db.header_mmr.get_base_leaf_count(),
+                leaf_nodes: db.header_mmr.to_base_leaf_nodes(index, count)?,
+            },
+            MmrTree::Utxo => MutableMmrState {
+                total_leaf_count: db.utxo_mmr.get_base_leaf_count(),
+                leaf_nodes: db.utxo_mmr.to_base_leaf_nodes(index, count)?,
+            },
+            MmrTree::RangeProof => MutableMmrState {
+                total_leaf_count: db.range_proof_mmr.get_base_leaf_count(),
+                leaf_nodes: db.range_proof_mmr.to_base_leaf_nodes(index, count)?,
+            },
+        };
+        Ok(mmr_state)
+    }
+
+    fn restore_mmr(&self, tree: MmrTree, base_state: MutableMmrLeafNodes) -> Result<(), ChainStorageError> {
+        let mut db = self
+            .db
+            .write()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        match tree {
+            MmrTree::Kernel => db.kernel_mmr.restore(base_state)?,
+            MmrTree::Header => db.header_mmr.restore(base_state)?,
+            MmrTree::Utxo => db.utxo_mmr.restore(base_state)?,
+            MmrTree::RangeProof => db.range_proof_mmr.restore(base_state)?,
+        };
+        Ok(())
+    }
+
     /// Iterate over all the stored orphan blocks and execute the function `f` for each block.
     fn for_each_orphan<F>(&self, mut f: F) -> Result<(), ChainStorageError>
     where F: FnMut(Result<(HashOutput, Block), ChainStorageError>) {
@@ -339,11 +417,19 @@ impl<D> Default for InnerDatabase<D>
 where D: Digest
 {
     fn default() -> Self {
-        let utxo_mmr = MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new()).unwrap();
-        let header_mmr = MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new()).unwrap();
-        let kernel_mmr = MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new()).unwrap();
-        let range_proof_mmr = MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new()).unwrap();
-        InnerDatabase {
+        let mct_config = MerkleChangeTrackerConfig {
+            min_history_len: 900,
+            max_history_len: 1000,
+        };
+        let utxo_mmr =
+            MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new(), mct_config).unwrap();
+        let header_mmr =
+            MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new(), mct_config).unwrap();
+        let kernel_mmr =
+            MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new(), mct_config).unwrap();
+        let range_proof_mmr =
+            MerkleChangeTracker::<D, _, _>::new(MutableMmr::new(Vec::new()), Vec::new(), mct_config).unwrap();
+        Self {
             headers: HashMap::default(),
             block_hashes: HashMap::default(),
             utxos: HashMap::default(),

@@ -20,13 +20,10 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{
-    comms_connector::{InboundDomainConnector, PeerMessage},
-    tari_message::TariMessageType,
-};
+use crate::comms_connector::{InboundDomainConnector, PeerMessage};
 use derive_error::Error;
 use futures::{channel::mpsc, Sink};
-use std::{error::Error, net::IpAddr, sync::Arc};
+use std::{error::Error, net::IpAddr, sync::Arc, time::Duration};
 use tari_comms::{
     builder::{CommsBuilderError, CommsError, CommsNode},
     connection::net_address::ip::SocketAddress,
@@ -49,13 +46,18 @@ pub enum CommsInitializationError {
     CommsServicesError(CommsError),
 }
 
+/// Configuration for a comms node
 #[derive(Clone)]
 pub struct CommsConfig {
+    /// Control service config.
     pub control_service: ControlServiceConfig,
+    /// An optional SOCKS address.
     pub socks_proxy_address: Option<SocketAddress>,
-    pub host: IpAddr,
+    /// The host IP that all inbound peer connections will listen (bind) on. This is usually 0.0.0.0
+    pub peer_connection_listening_address: IpAddr,
+    /// Identity of this node on the network.
     pub node_identity: Arc<NodeIdentity>,
-    /// Path to the LMDB file
+    /// Path to the LMDB file.
     pub datastore_path: String,
     /// Name to use for the peer database
     pub peer_database_name: String,
@@ -65,6 +67,8 @@ pub struct CommsConfig {
     pub outbound_buffer_size: usize,
     /// Configuration for DHT
     pub dht: DhtConfig,
+    /// Length of time to wait for a new outbound connection to be established before timing out
+    pub establish_connection_timeout: Duration,
 }
 
 /// Initialize Tari Comms
@@ -75,10 +79,10 @@ pub struct CommsConfig {
 pub fn initialize_comms<TSink>(
     executor: TaskExecutor,
     config: CommsConfig,
-    connector: InboundDomainConnector<TariMessageType, TSink>,
+    connector: InboundDomainConnector<TSink>,
 ) -> Result<(CommsNode, Dht), CommsInitializationError>
 where
-    TSink: Sink<Arc<PeerMessage<TariMessageType>>> + Unpin + Clone + Send + Sync + 'static,
+    TSink: Sink<Arc<PeerMessage>> + Unpin + Clone + Send + Sync + 'static,
     TSink::Error: Error + Send + Sync,
 {
     let _ = std::fs::create_dir(&config.datastore_path).unwrap_or_default();
@@ -106,7 +110,8 @@ where
         .configure_control_service(config.control_service)
         .configure_peer_connections(PeerConnectionConfig {
             socks_proxy_address: config.socks_proxy_address,
-            host: config.host,
+            host: config.peer_connection_listening_address,
+            peer_connection_establish_timeout: config.establish_connection_timeout,
             ..Default::default()
         })
         .build()

@@ -20,7 +20,6 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::support::random_string;
 use futures::Sink;
 use std::{error::Error, sync::Arc, time::Duration};
 use tari_comms::{
@@ -32,8 +31,8 @@ use tari_comms_dht::Dht;
 use tari_p2p::{
     comms_connector::{InboundDomainConnector, PeerMessage},
     initialization::{initialize_comms, CommsConfig},
-    tari_message::TariMessageType,
 };
+use tari_test_utils::random;
 use tempdir::TempDir;
 use tokio::runtime::TaskExecutor;
 
@@ -41,28 +40,29 @@ pub fn setup_comms_services<TSink>(
     executor: TaskExecutor,
     node_identity: Arc<NodeIdentity>,
     peers: Vec<NodeIdentity>,
-    publisher: InboundDomainConnector<TariMessageType, TSink>,
+    publisher: InboundDomainConnector<TSink>,
 ) -> (Arc<CommsNode>, Dht)
 where
-    TSink: Sink<Arc<PeerMessage<TariMessageType>>> + Clone + Unpin + Send + Sync + 'static,
+    TSink: Sink<Arc<PeerMessage>> + Clone + Unpin + Send + Sync + 'static,
     TSink::Error: Error + Send + Sync,
 {
     let comms_config = CommsConfig {
         node_identity: Arc::clone(&node_identity),
-        host: "127.0.0.1".parse().unwrap(),
+        peer_connection_listening_address: "127.0.0.1".parse().unwrap(),
         socks_proxy_address: None,
         control_service: ControlServiceConfig {
             listener_address: node_identity.control_service_address(),
             socks_proxy_address: None,
             requested_connection_timeout: Duration::from_millis(2000),
         },
-        datastore_path: TempDir::new(random_string(8).as_str())
+        datastore_path: TempDir::new(random::string(8).as_str())
             .unwrap()
             .path()
             .to_str()
             .unwrap()
             .to_string(),
-        peer_database_name: random_string(8),
+        establish_connection_timeout: Duration::from_secs(5),
+        peer_database_name: random::string(8),
         inbound_buffer_size: 10,
         outbound_buffer_size: 10,
         dht: Default::default(),
@@ -77,11 +77,11 @@ where
         comms
             .peer_manager()
             .add_peer(Peer::new(
-                p.identity.public_key,
-                p.identity.node_id,
+                p.public_key().clone(),
+                p.node_id().clone(),
                 addr.into(),
                 PeerFlags::default(),
-                p.identity.features,
+                p.features().clone(),
             ))
             .unwrap();
     }

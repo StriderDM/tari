@@ -32,14 +32,17 @@
 //! More details about the implementation are presented in
 //! [RFC-0111](https://rfc.tari.com/RFC-0111_BaseNodeArchitecture.html).
 
+mod backoff;
 mod base_node;
 mod comms_interface;
-mod service;
+mod proto;
 #[cfg(test)]
 mod test;
 
+pub mod service;
 pub mod states;
 
 // Public re-exports
+pub use backoff::BackOff;
 pub use base_node::BaseNodeStateMachine;
 pub use comms_interface::OutboundNodeCommsInterface;

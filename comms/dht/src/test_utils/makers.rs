@@ -21,8 +21,9 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
-    envelope::{DhtEnvelope, DhtHeader, DhtMessageFlags, DhtMessageType, NodeDestination},
+    envelope::{DhtMessageFlags, DhtMessageHeader, NodeDestination},
     inbound::DhtInboundMessage,
+    proto::envelope::{DhtEnvelope, DhtMessageType},
 };
 use rand::rngs::OsRng;
 use std::sync::Arc;
@@ -42,9 +43,20 @@ pub fn make_node_identity() -> Arc<NodeIdentity> {
         NodeIdentity::random(
             &mut OsRng::new().unwrap(),
             "127.0.0.1:9000".parse().unwrap(),
-            PeerFeatures::communication_node_default(),
+            PeerFeatures::COMMUNICATION_NODE,
         )
         .unwrap(),
+    )
+}
+
+pub fn make_peer() -> Peer {
+    let node_identity = make_node_identity();
+    Peer::new(
+        node_identity.public_key().clone(),
+        node_identity.node_id().clone(),
+        vec![node_identity.control_service_address()].into(),
+        PeerFlags::empty(),
+        PeerFeatures::COMMUNICATION_NODE,
     )
 }
 
@@ -53,7 +65,7 @@ pub fn make_client_identity() -> Arc<NodeIdentity> {
         NodeIdentity::random(
             &mut OsRng::new().unwrap(),
             "127.0.0.1:9000".parse().unwrap(),
-            PeerFeatures::communication_client_default(),
+            PeerFeatures::COMMUNICATION_CLIENT,
         )
         .unwrap(),
     )
@@ -67,29 +79,27 @@ pub fn make_comms_inbound_message(
 {
     InboundMessage::new(
         Peer::new(
-            node_identity.identity.public_key.clone(),
-            node_identity.identity.node_id.clone(),
+            node_identity.public_key().clone(),
+            node_identity.node_id().clone(),
             Vec::<NetAddress>::new().into(),
             PeerFlags::empty(),
-            PeerFeatures::communication_node_default(),
+            PeerFeatures::COMMUNICATION_NODE,
         ),
         MessageEnvelopeHeader {
-            version: 0,
-            message_public_key: node_identity.identity.public_key.clone(),
-            message_signature: Vec::new(),
+            public_key: node_identity.public_key().clone(),
+            signature: Vec::new(),
             flags,
         },
-        0,
         message,
     )
 }
 
-pub fn make_dht_header(node_identity: &NodeIdentity, message: &Vec<u8>, flags: DhtMessageFlags) -> DhtHeader {
-    DhtHeader {
+pub fn make_dht_header(node_identity: &NodeIdentity, message: &Vec<u8>, flags: DhtMessageFlags) -> DhtMessageHeader {
+    DhtMessageHeader {
         version: 0,
-        destination: NodeDestination::Unspecified,
+        destination: NodeDestination::Unknown,
         origin_public_key: node_identity.public_key().clone(),
-        origin_signature: signature::sign(&mut OsRng::new().unwrap(), node_identity.secret_key.clone(), message)
+        origin_signature: signature::sign(&mut OsRng::new().unwrap(), node_identity.secret_key().clone(), message)
             .unwrap()
             .to_binary()
             .unwrap(),
@@ -107,24 +117,18 @@ pub fn make_dht_inbound_message(
     DhtInboundMessage::new(
         make_dht_header(node_identity, &body, flags),
         Peer::new(
-            node_identity.identity.public_key.clone(),
-            node_identity.identity.node_id.clone(),
+            node_identity.public_key().clone(),
+            node_identity.node_id().clone(),
             Vec::<NetAddress>::new().into(),
             PeerFlags::empty(),
-            PeerFeatures::communication_node_default(),
+            PeerFeatures::COMMUNICATION_NODE,
         ),
-        MessageEnvelopeHeader {
-            version: 0,
-            message_public_key: node_identity.identity.public_key.clone(),
-            message_signature: Vec::new(),
-            flags: MessageFlags::empty(),
-        },
         body,
     )
 }
 
 pub fn make_dht_envelope(node_identity: &NodeIdentity, message: Vec<u8>, flags: DhtMessageFlags) -> DhtEnvelope {
-    DhtEnvelope::new(make_dht_header(node_identity, &message, flags), message)
+    DhtEnvelope::new(make_dht_header(node_identity, &message, flags).into(), message)
 }
 
 pub fn make_peer_manager() -> Arc<PeerManager> {
