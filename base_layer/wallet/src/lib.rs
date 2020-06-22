@@ -4,7 +4,6 @@
 
 #[macro_use]
 mod macros;
-pub mod ffi;
 pub mod contacts_service;
 pub mod error;
 pub mod output_manager_service;
