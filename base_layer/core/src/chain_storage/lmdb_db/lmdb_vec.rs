@@ -22,14 +22,18 @@
 
 use crate::chain_storage::{
     error::ChainStorageError,
-    lmdb_db::lmdb::{lmdb_clear_db, lmdb_delete, lmdb_get, lmdb_insert, lmdb_len},
+    lmdb_db::lmdb::{lmdb_clear_db, lmdb_delete, lmdb_get, lmdb_insert, lmdb_len, lmdb_replace},
 };
 use derive_error::Error;
 use lmdb_zero::{Database, Environment, WriteTransaction};
+use log::*;
 use std::{cmp::min, marker::PhantomData, sync::Arc};
+use tari_crypto::tari_utilities::message_format::MessageFormatError;
 use tari_mmr::{error::MerkleMountainRangeError, ArrayLike, ArrayLikeExt};
 use tari_storage::lmdb_store::LMDBError;
-use tari_utilities::message_format::MessageFormatError;
+
+const INDEX_OFFSET_DB_KEY: i64 = i64::min_value();
+pub const LOG_TARGET: &str = "c::cs::lmdb_db::lmdb_vec";
 
 #[derive(Debug, Error)]
 pub enum LMDBVecError {
@@ -54,31 +58,84 @@ impl<T> LMDBVec<T> {
     }
 }
 
-impl<T> ArrayLike for LMDBVec<T>
+impl<T> LMDBVec<T>
 where
     T: serde::Serialize,
+    for<'t> T: serde::de::DeserializeOwned,
+{
+    // Fetches the stored index offset of the first stored element in the db. When the index offset cannot be retrieved
+    // then a zero offset is recorded.
+    fn fetch_index_offset(&self) -> Result<i64, ChainStorageError> {
+        Ok(
+            match lmdb_get::<i64, i64>(&self.env, &self.db, &INDEX_OFFSET_DB_KEY)
+                .map_err(|e| ChainStorageError::AccessError(e.to_string()))?
+            {
+                Some(offset) => offset,
+                None => {
+                    let offset = 0;
+                    self.set_index_offset(offset)?;
+                    offset
+                },
+            },
+        )
+    }
+
+    // Store the provided offset as the new index offset.
+    fn set_index_offset(&self, offset: i64) -> Result<(), ChainStorageError> {
+        let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        {
+            lmdb_replace::<i64, i64>(&txn, &self.db, &INDEX_OFFSET_DB_KEY, &offset)?;
+        }
+        txn.commit().map_err(|e| {
+            error!(target: LOG_TARGET, "Lmdb commit failed with: {:?}", e);
+            ChainStorageError::AccessError(e.to_string())
+        })
+    }
+
+    // Uses the stored index offset to calculate the new db key for the provided index.
+    fn fetch_key(&self, index: usize) -> Result<i64, LMDBVecError> {
+        Ok(index_to_key(self.fetch_index_offset()?, index))
+    }
+}
+
+// Combine the index offset and array index to create a db key.
+fn index_to_key(offset: i64, index: usize) -> i64 {
+    offset + index as i64
+}
+
+impl<T> ArrayLike for LMDBVec<T>
+where
+    T: serde::Serialize + PartialEq,
     for<'t> T: serde::de::DeserializeOwned,
 {
     type Error = LMDBVecError;
     type Value = T;
 
     fn len(&self) -> Result<usize, Self::Error> {
-        Ok(lmdb_len(&self.env, &self.db)?)
+        Ok(lmdb_len(&self.env, &self.db)?.saturating_sub(1)) // Exclude the index offset
+    }
+
+    fn is_empty(&self) -> Result<bool, Self::Error> {
+        Ok(self.len()? == 0)
     }
 
     fn push(&mut self, item: Self::Value) -> Result<usize, Self::Error> {
         let index = self.len()?;
+        let key = self.fetch_key(index)?;
         let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
         {
-            lmdb_insert::<usize, T>(&txn, &self.db, &index, &item)?;
+            lmdb_insert::<i64, T>(&txn, &self.db, &key, &item)?;
         }
-        txn.commit()
-            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        txn.commit().map_err(|e| {
+            error!(target: LOG_TARGET, "Lmdb commit failed with: {:?}", e);
+            ChainStorageError::AccessError(e.to_string())
+        })?;
         Ok(index)
     }
 
     fn get(&self, index: usize) -> Result<Option<Self::Value>, Self::Error> {
-        Ok(lmdb_get::<usize, T>(&self.env, &self.db, &index)?)
+        let key = self.fetch_key(index)?;
+        Ok(lmdb_get::<i64, T>(&self.env, &self.db, &key)?)
     }
 
     fn get_or_panic(&self, index: usize) -> Self::Value {
@@ -90,87 +147,134 @@ where
         {
             lmdb_clear_db(&txn, &self.db)?;
         }
-        txn.commit()
-            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        txn.commit().map_err(|e| {
+            error!(target: LOG_TARGET, "Lmdb commit failed with: {:?}", e);
+            ChainStorageError::AccessError(e.to_string())
+        })?;
         Ok(())
+    }
+
+    fn position(&self, item: &Self::Value) -> Result<Option<usize>, Self::Error> {
+        let num_elements = self.len()?;
+        let index_offset = self.fetch_index_offset()?;
+        for index in 0..num_elements {
+            let key = index_to_key(index_offset, index);
+            if let Some(stored_item) = lmdb_get::<i64, T>(&self.env, &self.db, &key)
+                .map_err(|e| ChainStorageError::AccessError(e.to_string()))?
+            {
+                if stored_item == *item {
+                    return Ok(Some(index));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
 impl<T> ArrayLikeExt for LMDBVec<T>
 where
-    T: serde::Serialize,
+    T: serde::Serialize + PartialEq,
     for<'t> T: serde::de::DeserializeOwned,
 {
     type Value = T;
 
     fn truncate(&mut self, len: usize) -> Result<(), MerkleMountainRangeError> {
-        let n_elements =
-            lmdb_len(&self.env, &self.db).map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
-        if n_elements > len {
+        let num_elements = self
+            .len()
+            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
+        if num_elements > len {
+            let index_offset = self
+                .fetch_index_offset()
+                .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
             let txn = WriteTransaction::new(self.env.clone())
                 .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
             {
-                for index in len..n_elements {
-                    lmdb_delete(&txn, &self.db, &index)
+                for index in len..num_elements {
+                    let key = index_to_key(index_offset, index);
+                    lmdb_delete(&txn, &self.db, &key)
                         .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
                 }
             }
-            txn.commit()
-                .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
+            txn.commit().map_err(|e| {
+                error!(target: LOG_TARGET, "Lmdb commit failed with: {:?}", e);
+                MerkleMountainRangeError::BackendError(e.to_string())
+            })?;
         }
         Ok(())
     }
 
     fn shift(&mut self, n: usize) -> Result<(), MerkleMountainRangeError> {
-        let n_elements =
-            lmdb_len(&self.env, &self.db).map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
-        // Remove the first n elements
-        let drain_n = min(n, n_elements);
+        let num_elements = self
+            .len()
+            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
+        let num_drain = min(n, num_elements);
+        let index_offset = self
+            .fetch_index_offset()
+            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
         let txn = WriteTransaction::new(self.env.clone())
             .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
         {
-            for index in 0..drain_n {
-                lmdb_delete(&txn, &self.db, &index)
-                    .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
+            for index in 0..num_drain {
+                let key = index_to_key(index_offset, index);
+                lmdb_delete(&txn, &self.db, &key).map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
             }
+            // Update the stored index offset
+            let updated_index_offset = index_offset + num_drain as i64;
+            lmdb_replace::<i64, i64>(&txn, &self.db, &INDEX_OFFSET_DB_KEY, &updated_index_offset)
+                .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
         }
-        txn.commit()
+        txn.commit().map_err(|e| {
+            error!(target: LOG_TARGET, "Lmdb commit failed with: {:?}", e);
+            MerkleMountainRangeError::BackendError(e.to_string())
+        })
+    }
+
+    fn push_front(&mut self, item: Self::Value) -> Result<(), MerkleMountainRangeError> {
+        let index_offset = self
+            .fetch_index_offset()
             .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
-        // Update the indices of the remaining elements
-        // TODO: this function is very inefficient and can be improved by keeping track of a starting index offset,
-        // allowing the keys of the remaining items to remain the same but work as if they were updated. There might
-        // also be a more efficient way to update the keys using lmdb zero.
-        let mut shift_index = 0usize;
+        let key = index_offset - 1;
         let txn = WriteTransaction::new(self.env.clone())
             .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
         {
-            for index in drain_n..n_elements {
-                let item = lmdb_get::<usize, T>(&self.env, &self.db, &index)
-                    .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?
-                    .ok_or(MerkleMountainRangeError::BackendError("Unexpected error".into()))?;
-                lmdb_delete(&txn, &self.db, &index)
-                    .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
-                lmdb_insert(&txn, &self.db, &shift_index, &item)
-                    .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
-                shift_index += 1;
-            }
+            lmdb_insert::<i64, T>(&txn, &self.db, &key, &item)
+                .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
+            lmdb_replace::<i64, i64>(&txn, &self.db, &INDEX_OFFSET_DB_KEY, &key)
+                .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
         }
-        txn.commit()
-            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
+        txn.commit().map_err(|e| {
+            error!(target: LOG_TARGET, "Lmdb commit failed with: {:?}", e);
+            MerkleMountainRangeError::BackendError(e.to_string())
+        })?;
         Ok(())
     }
 
     fn for_each<F>(&self, mut f: F) -> Result<(), MerkleMountainRangeError>
     where F: FnMut(Result<Self::Value, MerkleMountainRangeError>) {
-        let n_elements =
-            lmdb_len(&self.env, &self.db).map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
-        for index in 0..n_elements {
-            let val = lmdb_get::<usize, T>(&self.env, &self.db, &index)
+        let num_elements = self
+            .len()
+            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
+        let index_offset = self
+            .fetch_index_offset()
+            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
+        for index in 0..num_elements {
+            let key = index_to_key(index_offset, index);
+            let val = lmdb_get::<i64, T>(&self.env, &self.db, &key)
                 .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?
-                .ok_or(MerkleMountainRangeError::BackendError("Unexpected error".into()))?;
+                .ok_or_else(|| MerkleMountainRangeError::BackendError("Unexpected error".into()))?;
             f(Ok(val))
         }
         Ok(())
+    }
+}
+
+impl<T> Clone for LMDBVec<T>
+where
+    T: serde::Serialize,
+    for<'t> T: serde::de::DeserializeOwned,
+{
+    fn clone(&self) -> Self {
+        LMDBVec::new(self.env.clone(), self.db.clone())
     }
 }
 
@@ -178,11 +282,11 @@ where
 mod test {
     use super::*;
     use tari_storage::lmdb_store::{db, LMDBBuilder};
-    use tari_test_utils::paths::create_random_database_path;
+    use tari_test_utils::paths::create_temporary_data_path;
 
     #[test]
     fn len_push_get_truncate_for_each_shift_clear() {
-        let path = create_random_database_path().to_str().unwrap().to_string();
+        let path = create_temporary_data_path().to_str().unwrap().to_string();
         let _ = std::fs::create_dir(&path).unwrap_or_default();
         let lmdb_store = LMDBBuilder::new()
             .set_path(&path)
@@ -216,8 +320,25 @@ mod test {
         assert!(mem_vec.shift(2).is_ok());
         assert!(lmdb_vec.shift(2).is_ok());
         assert_eq!(lmdb_vec.len().unwrap(), 2);
-        assert_eq!(lmdb_vec.get(0).unwrap(), Some(300));
-        assert_eq!(lmdb_vec.get(1).unwrap(), Some(400));
+        mem_vec
+            .iter()
+            .enumerate()
+            .for_each(|(i, val)| assert_eq!(lmdb_vec.get(i).unwrap(), Some(val.clone())));
+
+        assert!(mem_vec.push_front(200).is_ok());
+        assert!(mem_vec.push_front(100).is_ok());
+        assert!(lmdb_vec.push_front(200).is_ok());
+        assert!(lmdb_vec.push_front(100).is_ok());
+        assert_eq!(lmdb_vec.len().unwrap(), 4);
+        mem_vec
+            .iter()
+            .enumerate()
+            .for_each(|(i, val)| assert_eq!(lmdb_vec.get(i).unwrap(), Some(val.clone())));
+
+        for index in 0..lmdb_vec.len().unwrap() {
+            let item = lmdb_vec.get(index).unwrap().unwrap();
+            assert_eq!(lmdb_vec.position(&item).unwrap(), Some(index));
+        }
 
         assert!(lmdb_vec.clear().is_ok());
         assert_eq!(lmdb_vec.len().unwrap(), 0);

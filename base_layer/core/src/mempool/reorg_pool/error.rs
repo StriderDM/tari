@@ -20,11 +20,11 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// use crate::chain_storage::ChainStorageError;
 use derive_error::Error;
 
 #[derive(Debug, Error)]
 pub enum ReorgPoolError {
-    /// The Thread Safety has been breached and the data access has become poisoned
-    PoisonedAccess,
+    /// A problem has been encountered with the storage backend.
+    #[error(non_std, no_from)]
+    BackendError(String),
 }

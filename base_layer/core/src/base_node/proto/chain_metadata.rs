@@ -25,22 +25,27 @@ use crate::chain_storage::ChainMetadata;
 
 impl From<proto::ChainMetadata> for ChainMetadata {
     fn from(metadata: proto::ChainMetadata) -> Self {
+        let accumulated_difficulty = metadata.accumulated_difficulty.map(Into::into);
         Self {
             height_of_longest_chain: metadata.height_of_longest_chain,
             best_block: metadata.best_block,
-            total_accumulated_difficulty: metadata.total_accumulated_difficulty.into(),
             pruning_horizon: metadata.pruning_horizon,
+            accumulated_difficulty,
         }
     }
 }
 
 impl From<ChainMetadata> for proto::ChainMetadata {
     fn from(metadata: ChainMetadata) -> Self {
+        let accumulated_difficulty = match metadata.accumulated_difficulty {
+            None => None,
+            Some(v) => Some(v.into()),
+        };
         Self {
             height_of_longest_chain: metadata.height_of_longest_chain,
             best_block: metadata.best_block,
-            total_accumulated_difficulty: metadata.total_accumulated_difficulty.as_u64(),
             pruning_horizon: metadata.pruning_horizon,
+            accumulated_difficulty,
         }
     }
 }

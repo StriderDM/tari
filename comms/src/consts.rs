@@ -20,17 +20,11 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::types::CommsRng;
-use std::cell::RefCell;
-
-thread_local! {
-    /// Thread local RNG for comms
-    pub(crate) static COMMS_RNG: RefCell<CommsRng> = RefCell::new(CommsRng::new().expect("Failed to initialize CommsRng"));
-}
+use std::time::Duration;
 
 /// The maximum number of peers to return from the flood_identities method in peer manager
 pub const PEER_MANAGER_MAX_FLOOD_PEERS: usize = 1000;
 
-/// The envelope version. This should be increased any time a change is made to the
-/// envelope proto files.
-pub const ENVELOPE_VERSION: u32 = 0;
+/// The amount of time to consider a peer to be offline (i.e. dial to peer will fail without trying) after a failed
+/// connection attempt
+pub const PEER_OFFLINE_COOLDOWN_PERIOD: Duration = Duration::from_secs(60);

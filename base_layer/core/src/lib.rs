@@ -21,25 +21,47 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Needed to make futures::select! work
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 // Used to eliminate the need for boxing futures in many cases.
 // Tracking issue: https://github.com/rust-lang/rust/issues/63063
 #![feature(type_alias_impl_trait)]
+// Enable usage of Vec::shrink_to
+#![feature(shrink_to)]
 
-#[cfg(test)]
-pub mod test_utils;
+#[macro_use]
+extern crate bitflags;
 
-pub mod consts;
-pub mod mempool;
-pub mod proof_of_work;
-
-pub mod proto;
-pub mod types;
-
-pub mod base_node;
+#[cfg(feature = "base_node")]
 pub mod blocks;
-
+#[cfg(feature = "base_node")]
 pub mod chain_storage;
+#[cfg(feature = "base_node")]
+pub mod consensus;
+#[cfg(feature = "base_node")]
+pub mod helpers;
+#[cfg(feature = "base_node")]
+pub mod mining;
+#[cfg(feature = "base_node")]
+pub mod proof_of_work;
+#[cfg(feature = "base_node")]
+pub mod validation;
+
+#[cfg(any(feature = "base_node", feature = "base_node_proto"))]
+pub mod base_node;
+#[cfg(any(feature = "base_node", feature = "base_node_proto"))]
+pub mod proto;
+
+#[cfg(any(feature = "base_node", feature = "mempool_proto"))]
+pub mod mempool;
+
+#[cfg(feature = "transactions")]
+pub mod transactions;
 
 // Re-export the crypto crate to make exposing traits etc easier for clients of this crate
+pub use crypto::tari_utilities;
 pub use tari_crypto as crypto;
+
+uint::construct_uint! {
+    /// 256-bit unsigned integer.
+    pub(crate) struct U256(4);
+}

@@ -1,26 +1,41 @@
 [package]
-name = "wallet_ffi"
-version = "0.0.5"
+name = "tari_wallet_ffi"
+authors = ["The Tari Development Community"]
+description = "Tari cryptocurrency wallet C FFI bindings"
+license = "BSD-3-Clause"
+version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-tari_comms = { path = "../../comms", version = "^0.0"}
-tari_comms_dht = { path = "../../comms/dht", version = "^0.0"}
-tari_crypto = { path = "../../infrastructure/crypto", version = "^0.0" }
-tari_p2p = {path = "../p2p", version = "^0.0"}
-tari_transactions = { path = "../transactions", version="^0.0"}
-tari_utilities = { path = "../../infrastructure/tari_util", version = "^0.0"}
-tari_wallet = { path = "../wallet", version = "^0.0", features = ["test_harness", "c_integration"]}
+tari_comms = { path = "../../comms", version = "^0.1"}
+tari_comms_dht = { path = "../../comms/dht", version = "^0.1"}
+tari_crypto = { version = "^0.3" }
+tari_p2p = {path = "../p2p", version = "^0.1"}
+tari_wallet = { path = "../wallet", version = "^0.1", features = ["test_harness", "c_integration"]}
+tari_shutdown = { path = "../../infrastructure/shutdown", version = "^0.0"}
+tari_utilities = "^0.1"
 
-futures =  { version = "=0.3.0-alpha.19", package = "futures-preview", features =["compat", "std"]}
-tokio = "0.2.0-alpha.4"
+futures =  { version = "^0.3.1", features =["compat", "std"]}
+tokio = "0.2.10"
 libc = "0.2.65"
-rand = "0.5.5"
+rand = "0.7.2"
 chrono = { version = "0.4.6", features = ["serde"]}
-tempdir = "0.3.7"
-tari_broadcast_channel = { version="^0.0",  path = "../../infrastructure/broadcast_channel" }
+tari_broadcast_channel = "^0.2"
+derive-error = "0.0.4"
+log = "0.4.6"
+log4rs = {version = "0.8.3", features = ["console_appender", "file_appender", "file", "yaml_format"]}
+
+[dependencies.tari_core]
+path = "../../base_layer/core"
+version = "^0.1"
+default-features = false
+features = ["transactions"]
 
 [lib]
 crate-type = ["staticlib","cdylib"]
 
 [dev-dependencies]
+tempdir = "0.3.7"
+lazy_static = "1.3.0"
+env_logger = "0.7.1"
+tari_key_manager = {path = "../key_manager", version = "^0.0"}

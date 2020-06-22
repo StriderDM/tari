@@ -22,32 +22,33 @@
 //
 use crate::{
     base_node::{
-        states::{error::BaseNodeError, StateEvent},
+        states::{listening::ListeningData, StateEvent},
         BaseNodeStateMachine,
     },
     chain_storage::BlockchainBackend,
 };
 use log::*;
-use std::ops::Deref;
 
-const LOG_TARGET: &str = "base_node::starting_state";
+const LOG_TARGET: &str = "c::bn::states::starting_state";
 
 // The data structure handling Base Node Startup
+#[derive(Clone, Debug, PartialEq)]
 pub struct Starting;
 
 impl Starting {
-    /// Apply the configuration settings for this node.
-    fn apply_config(&mut self) -> Result<(), BaseNodeError> {
-        // TODO apply configuration
-        Ok(())
+    pub async fn next_event<B: BlockchainBackend + 'static>(
+        &mut self,
+        _shared: &BaseNodeStateMachine<B>,
+    ) -> StateEvent
+    {
+        info!(target: LOG_TARGET, "Starting node.");
+        StateEvent::Initialized
     }
+}
 
-    pub async fn next_event<B: BlockchainBackend>(&mut self, shared: &BaseNodeStateMachine<B>) -> StateEvent {
-        info!(target: LOG_TARGET, "Configuring node.");
-        if let Err(err) = self.apply_config() {
-            return err.as_fatal("There was an error with the base node configuration.");
-        }
-        info!(target: LOG_TARGET, "Node configuration complete.");
-        BaseNodeStateMachine::<B>::check_interrupt(shared.user_stopped.deref(), StateEvent::Initialized)
+/// State management for Starting -> Listening. This state change occurs every time a node is restarted.
+impl From<Starting> for ListeningData {
+    fn from(_old_state: Starting) -> Self {
+        ListeningData {}
     }
 }

@@ -20,11 +20,11 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::chain_storage::ChainStorageError;
+use crate::{chain_storage::ChainStorageError, consensus::ConsensusManagerError};
 use derive_error::Error;
 use tari_service_framework::reply_channel::TransportChannelError;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Clone)]
 pub enum CommsInterfaceError {
     /// Access to the underlying storage mechanism failed
     UnexpectedApiResponse,
@@ -35,4 +35,11 @@ pub enum CommsInterfaceError {
     #[error(non_std, no_from)]
     OutboundMessageService(String),
     EventStreamError,
+    #[error(non_std, no_from)]
+    MempoolError(String),
+    /// Failure in broadcast DHT middleware
+    BroadcastFailed,
+    DifficultyAdjustmentManagerError(ConsensusManagerError),
+    #[error(msg_embedded, non_std, no_from)]
+    InvalidPeerResponse(String),
 }

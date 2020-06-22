@@ -27,7 +27,5 @@ use derive_error::Error;
 pub enum UnconfirmedPoolError {
     /// The HashMap and BTreeMap are out of sync
     StorageOutofSync,
-    /// The Thread Safety has been breached and the data access has become poisoned
-    PoisonedAccess,
     PriorityError(PriorityError),
 }

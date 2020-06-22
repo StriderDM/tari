@@ -27,21 +27,42 @@
 //! backed by LMDB, while the merkle trees are stored in flat files for example.
 
 mod blockchain_database;
+mod consts;
 mod db_transaction;
 mod error;
 mod historical_block;
 mod lmdb_db;
 mod memory_db;
 mod metadata;
-#[cfg(test)]
-mod test;
 
 // public modules
 pub mod async_db;
 
 // Public API exports
-pub use blockchain_database::{BlockAddResult, BlockchainBackend, BlockchainDatabase, MutableMmrState};
-pub use db_transaction::{DbTransaction, MmrTree};
+pub use blockchain_database::{
+    calculate_mmr_roots,
+    fetch_header,
+    fetch_headers,
+    fetch_target_difficulties,
+    is_stxo,
+    is_utxo,
+    BlockAddResult,
+    BlockchainBackend,
+    BlockchainDatabase,
+    BlockchainDatabaseConfig,
+    MutableMmrState,
+    Validators,
+};
+pub use db_transaction::{
+    DbKey,
+    DbKeyValuePair,
+    DbTransaction,
+    DbValue,
+    MetadataKey,
+    MetadataValue,
+    MmrTree,
+    WriteOperation,
+};
 pub use error::ChainStorageError;
 pub use historical_block::HistoricalBlock;
 pub use lmdb_db::{
@@ -49,18 +70,13 @@ pub use lmdb_db::{
     LMDBDatabase,
     LMDB_DB_BLOCK_HASHES,
     LMDB_DB_HEADERS,
-    LMDB_DB_HEADER_MMR_BASE_BACKEND,
-    LMDB_DB_HEADER_MMR_CP_BACKEND,
     LMDB_DB_KERNELS,
-    LMDB_DB_KERNEL_MMR_BASE_BACKEND,
     LMDB_DB_KERNEL_MMR_CP_BACKEND,
     LMDB_DB_METADATA,
     LMDB_DB_ORPHANS,
-    LMDB_DB_RANGE_PROOF_MMR_BASE_BACKEND,
     LMDB_DB_RANGE_PROOF_MMR_CP_BACKEND,
     LMDB_DB_STXOS,
     LMDB_DB_UTXOS,
-    LMDB_DB_UTXO_MMR_BASE_BACKEND,
     LMDB_DB_UTXO_MMR_CP_BACKEND,
 };
 pub use memory_db::MemoryDatabase;

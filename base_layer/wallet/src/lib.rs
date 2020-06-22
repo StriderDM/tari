@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "1024"]
 #![feature(drain_filter)]
 #![feature(type_alias_impl_trait)]
 
@@ -11,6 +11,7 @@ pub mod output_manager_service;
 pub mod storage;
 pub mod transaction_service;
 pub mod types;
+pub mod util;
 pub mod wallet;
 
 #[cfg(feature = "test_harness")]
@@ -18,10 +19,12 @@ pub mod testnet_utils;
 
 pub use wallet::Wallet;
 
-// TODO: Put back after MVP
-//#[macro_use]
-// extern crate diesel;
-//#[macro_use]
-// extern crate diesel_migrations;
-// pub mod schema;
+#[macro_use]
+extern crate diesel;
+#[macro_use]
+extern crate diesel_migrations;
+#[macro_use]
+extern crate lazy_static;
+
+pub mod schema;
 // pub mod text_message_service;

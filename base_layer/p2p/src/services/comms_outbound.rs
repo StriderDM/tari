@@ -24,7 +24,7 @@ use futures::future::{self, Future};
 use tari_comms_dht::outbound::OutboundMessageRequester;
 use tari_service_framework::{handles::ServiceHandlesFuture, ServiceInitializationError, ServiceInitializer};
 use tari_shutdown::ShutdownSignal;
-use tokio::runtime::TaskExecutor;
+use tokio::runtime;
 
 /// Convenience type alias for external services that want to use this services handle
 pub type CommsOutboundHandle = OutboundMessageRequester;
@@ -43,7 +43,7 @@ impl CommsOutboundServiceInitializer {
 impl ServiceInitializer for CommsOutboundServiceInitializer {
     type Future = impl Future<Output = Result<(), ServiceInitializationError>>;
 
-    fn initialize(&mut self, _: TaskExecutor, handles: ServiceHandlesFuture, _: ShutdownSignal) -> Self::Future {
+    fn initialize(&mut self, _: runtime::Handle, handles: ServiceHandlesFuture, _: ShutdownSignal) -> Self::Future {
         handles.register(
             self.oms
                 .take()

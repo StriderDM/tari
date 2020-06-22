@@ -20,13 +20,14 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[allow(dead_code)]
 mod support;
 
 use croaring::Bitmap;
 use digest::Digest;
 use support::{create_mmr, int_to_hash, Hasher};
+use tari_crypto::tari_utilities::hex::Hex;
 use tari_mmr::{Hash, HashSlice, MutableMmr};
-use tari_utilities::hex::Hex;
 
 fn hash_with_bitmap(hash: &HashSlice, bitmap: &mut Bitmap) -> Hash {
     bitmap.run_optimize();
@@ -37,7 +38,7 @@ fn hash_with_bitmap(hash: &HashSlice, bitmap: &mut Bitmap) -> Hash {
 /// MMRs with no elements should provide sane defaults. The merkle root must be the hash of an empty string, b"".
 #[test]
 fn zero_length_mmr() {
-    let mmr = MutableMmr::<Hasher, _>::new(Vec::default());
+    let mmr = MutableMmr::<Hasher, _>::new(Vec::default(), Bitmap::create());
     assert_eq!(mmr.len(), 0);
     assert_eq!(mmr.is_empty(), Ok(true));
     let empty_hash = Hasher::digest(b"").to_vec();
@@ -50,7 +51,7 @@ fn zero_length_mmr() {
 #[test]
 // Note the hardcoded hashes are only valid when using Blake256 as the Hasher
 fn delete() {
-    let mut mmr = MutableMmr::<Hasher, _>::new(Vec::default());
+    let mut mmr = MutableMmr::<Hasher, _>::new(Vec::default(), Bitmap::create());
     assert_eq!(mmr.is_empty(), Ok(true));
     for i in 0..5 {
         assert!(mmr.push(&int_to_hash(i)).is_ok());
@@ -108,7 +109,7 @@ fn build_mmr() {
     assert_eq!(mmr_check.len(), Ok(8));
     let mut bitmap = Bitmap::create();
     // Create a small mutable MMR
-    let mut mmr = MutableMmr::<Hasher, _>::new(Vec::default());
+    let mut mmr = MutableMmr::<Hasher, _>::new(Vec::default(), Bitmap::create());
     for i in 0..5 {
         assert!(mmr.push(&int_to_hash(i)).is_ok());
     }
@@ -126,8 +127,8 @@ fn build_mmr() {
 
 #[test]
 fn equality_check() {
-    let mut ma = MutableMmr::<Hasher, _>::new(Vec::default());
-    let mut mb = MutableMmr::<Hasher, _>::new(Vec::default());
+    let mut ma = MutableMmr::<Hasher, _>::new(Vec::default(), Bitmap::create());
+    let mut mb = MutableMmr::<Hasher, _>::new(Vec::default(), Bitmap::create());
     assert!(ma == mb);
     assert!(ma.push(&int_to_hash(1)).is_ok());
     assert!(ma != mb);
@@ -148,7 +149,7 @@ fn equality_check() {
 
 #[test]
 fn restore_from_leaf_nodes() {
-    let mut mmr = MutableMmr::<Hasher, _>::new(Vec::default());
+    let mut mmr = MutableMmr::<Hasher, _>::new(Vec::default(), Bitmap::create());
     for i in 0..12 {
         assert!(mmr.push(&int_to_hash(i)).is_ok());
     }
@@ -173,7 +174,7 @@ fn restore_from_leaf_nodes() {
     assert!(mmr.delete_and_compress(3, true));
 
     // Restore from compact state
-    assert!(mmr.restore(mmr_state1.clone()).is_ok());
+    assert!(mmr.assign(mmr_state1.clone()).is_ok());
     assert_eq!(mmr.get_merkle_root(), mmr_root);
     let restored_mmr_state = mmr.to_leaf_nodes(0, mmr.get_leaf_count()).unwrap();
     assert_eq!(restored_mmr_state, mmr_state2);

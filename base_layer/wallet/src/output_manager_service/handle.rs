@@ -25,14 +25,17 @@ use crate::output_manager_service::{
     service::Balance,
     storage::database::PendingTransactionOutputs,
 };
-use std::{collections::HashMap, time::Duration};
-use tari_service_framework::reply_channel::SenderService;
-use tari_transactions::{
+use futures::{stream::Fuse, StreamExt};
+use std::{collections::HashMap, fmt, time::Duration};
+use tari_broadcast_channel::Subscriber;
+use tari_comms::types::CommsPublicKey;
+use tari_core::transactions::{
     tari_amount::MicroTari,
-    transaction::{TransactionInput, TransactionOutput, UnblindedOutput},
+    transaction::{Transaction, TransactionInput, TransactionOutput, UnblindedOutput},
     types::PrivateKey,
     SenderTransactionProtocol,
 };
+use tari_service_framework::reply_channel::SenderService;
 use tower::Service;
 
 /// API Request enum
@@ -41,15 +44,44 @@ pub enum OutputManagerRequest {
     GetBalance,
     AddOutput(UnblindedOutput),
     GetRecipientKey((u64, MicroTari)),
-    ConfirmReceivedOutput((u64, TransactionOutput)),
-    ConfirmSentTransaction((u64, Vec<TransactionInput>, Vec<TransactionOutput>)),
+    ConfirmPendingTransaction(u64),
+    ConfirmTransaction((u64, Vec<TransactionInput>, Vec<TransactionOutput>)),
     PrepareToSendTransaction((MicroTari, MicroTari, Option<u64>, String)),
     CancelTransaction(u64),
     TimeoutTransactions(Duration),
     GetPendingTransactions,
     GetSpentOutputs,
     GetUnspentOutputs,
+    GetInvalidOutputs,
     GetSeedWords,
+    SetBaseNodePublicKey(CommsPublicKey),
+    SyncWithBaseNode,
+    CreateCoinSplit((MicroTari, usize, MicroTari, Option<u64>)),
+}
+
+impl fmt::Display for OutputManagerRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GetBalance => f.write_str("GetBalance"),
+            Self::AddOutput(v) => f.write_str(&format!("AddOutput ({})", v.value)),
+            Self::GetRecipientKey(v) => f.write_str(&format!("GetRecipientKey ({})", v.0)),
+            Self::ConfirmTransaction(v) => f.write_str(&format!("ConfirmTransaction ({})", v.0)),
+            Self::ConfirmPendingTransaction(v) => f.write_str(&format!("ConfirmPendingTransaction ({})", v)),
+            Self::PrepareToSendTransaction((_, _, _, msg)) => {
+                f.write_str(&format!("PrepareToSendTransaction ({})", msg))
+            },
+            Self::CancelTransaction(v) => f.write_str(&format!("CancelTransaction ({})", v)),
+            Self::TimeoutTransactions(d) => f.write_str(&format!("TimeoutTransactions ({}s)", d.as_secs())),
+            Self::GetPendingTransactions => f.write_str("GetPendingTransactions"),
+            Self::GetSpentOutputs => f.write_str("GetSpentOutputs"),
+            Self::GetUnspentOutputs => f.write_str("GetUnspentOutputs"),
+            Self::GetInvalidOutputs => f.write_str("GetInvalidOutputs"),
+            Self::GetSeedWords => f.write_str("GetSeedWords"),
+            Self::SetBaseNodePublicKey(k) => f.write_str(&format!("SetBaseNodePublicKey ({})", k)),
+            Self::SyncWithBaseNode => f.write_str("SyncWithBaseNode"),
+            Self::CreateCoinSplit(v) => f.write_str(&format!("CreateCoinSplit ({})", v.0)),
+        }
+    }
 }
 
 /// API Reply enum
@@ -58,6 +90,7 @@ pub enum OutputManagerResponse {
     OutputAdded,
     RecipientKeyGenerated(PrivateKey),
     OutputConfirmed,
+    PendingTransactionConfirmed,
     TransactionConfirmed,
     TransactionToSend(SenderTransactionProtocol),
     TransactionCancelled,
@@ -65,17 +98,38 @@ pub enum OutputManagerResponse {
     PendingTransactions(HashMap<u64, PendingTransactionOutputs>),
     SpentOutputs(Vec<UnblindedOutput>),
     UnspentOutputs(Vec<UnblindedOutput>),
+    InvalidOutputs(Vec<UnblindedOutput>),
     SeedWords(Vec<String>),
+    BaseNodePublicKeySet,
+    StartedBaseNodeSync(u64),
+    Transaction((u64, Transaction, MicroTari, MicroTari)),
+}
+
+/// Events that can be published on the Text Message Service Event Stream
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub enum OutputManagerEvent {
+    BaseNodeSyncRequestTimedOut(u64),
+    ReceiveBaseNodeResponse(u64),
+    Error(String),
 }
 
 #[derive(Clone)]
 pub struct OutputManagerHandle {
     handle: SenderService<OutputManagerRequest, Result<OutputManagerResponse, OutputManagerError>>,
+    event_stream: Subscriber<OutputManagerEvent>,
 }
 
 impl OutputManagerHandle {
-    pub fn new(handle: SenderService<OutputManagerRequest, Result<OutputManagerResponse, OutputManagerError>>) -> Self {
-        OutputManagerHandle { handle }
+    pub fn new(
+        handle: SenderService<OutputManagerRequest, Result<OutputManagerResponse, OutputManagerError>>,
+        event_stream: Subscriber<OutputManagerEvent>,
+    ) -> Self
+    {
+        OutputManagerHandle { handle, event_stream }
+    }
+
+    pub fn get_event_stream_fused(&self) -> Fuse<Subscriber<OutputManagerEvent>> {
+        self.event_stream.clone().fuse()
     }
 
     pub async fn add_output(&mut self, output: UnblindedOutput) -> Result<(), OutputManagerError> {
@@ -131,23 +185,18 @@ impl OutputManagerHandle {
         }
     }
 
-    pub async fn confirm_received_output(
-        &mut self,
-        tx_id: u64,
-        output: TransactionOutput,
-    ) -> Result<(), OutputManagerError>
-    {
+    pub async fn confirm_pending_transaction(&mut self, tx_id: u64) -> Result<(), OutputManagerError> {
         match self
             .handle
-            .call(OutputManagerRequest::ConfirmReceivedOutput((tx_id, output)))
+            .call(OutputManagerRequest::ConfirmPendingTransaction(tx_id))
             .await??
         {
-            OutputManagerResponse::OutputConfirmed => Ok(()),
+            OutputManagerResponse::PendingTransactionConfirmed => Ok(()),
             _ => Err(OutputManagerError::UnexpectedApiResponse),
         }
     }
 
-    pub async fn confirm_sent_transaction(
+    pub async fn confirm_transaction(
         &mut self,
         tx_id: u64,
         spent_outputs: Vec<TransactionInput>,
@@ -156,7 +205,7 @@ impl OutputManagerHandle {
     {
         match self
             .handle
-            .call(OutputManagerRequest::ConfirmSentTransaction((
+            .call(OutputManagerRequest::ConfirmTransaction((
                 tx_id,
                 spent_outputs,
                 received_outputs,
@@ -213,9 +262,57 @@ impl OutputManagerHandle {
         }
     }
 
+    pub async fn get_invalid_outputs(&mut self) -> Result<Vec<UnblindedOutput>, OutputManagerError> {
+        match self.handle.call(OutputManagerRequest::GetInvalidOutputs).await?? {
+            OutputManagerResponse::InvalidOutputs(s) => Ok(s),
+            _ => Err(OutputManagerError::UnexpectedApiResponse),
+        }
+    }
+
     pub async fn get_seed_words(&mut self) -> Result<Vec<String>, OutputManagerError> {
         match self.handle.call(OutputManagerRequest::GetSeedWords).await?? {
             OutputManagerResponse::SeedWords(s) => Ok(s),
+            _ => Err(OutputManagerError::UnexpectedApiResponse),
+        }
+    }
+
+    pub async fn set_base_node_public_key(&mut self, public_key: CommsPublicKey) -> Result<(), OutputManagerError> {
+        match self
+            .handle
+            .call(OutputManagerRequest::SetBaseNodePublicKey(public_key))
+            .await??
+        {
+            OutputManagerResponse::BaseNodePublicKeySet => Ok(()),
+            _ => Err(OutputManagerError::UnexpectedApiResponse),
+        }
+    }
+
+    pub async fn sync_with_base_node(&mut self) -> Result<u64, OutputManagerError> {
+        match self.handle.call(OutputManagerRequest::SyncWithBaseNode).await?? {
+            OutputManagerResponse::StartedBaseNodeSync(request_key) => Ok(request_key),
+            _ => Err(OutputManagerError::UnexpectedApiResponse),
+        }
+    }
+
+    pub async fn create_coin_split(
+        &mut self,
+        amount_per_split: MicroTari,
+        split_count: usize,
+        fee_per_gram: MicroTari,
+        lock_height: Option<u64>,
+    ) -> Result<(u64, Transaction, MicroTari, MicroTari), OutputManagerError>
+    {
+        match self
+            .handle
+            .call(OutputManagerRequest::CreateCoinSplit((
+                amount_per_split,
+                split_count,
+                fee_per_gram,
+                lock_height,
+            )))
+            .await??
+        {
+            OutputManagerResponse::Transaction(ct) => Ok(ct),
             _ => Err(OutputManagerError::UnexpectedApiResponse),
         }
     }

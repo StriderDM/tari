@@ -22,13 +22,15 @@
 
 use crate::output_manager_service::storage::database::DbKey;
 use derive_error::Error;
+use diesel::result::Error as DieselError;
+use tari_comms_dht::outbound::DhtOutboundError;
+use tari_core::transactions::{transaction::TransactionError, transaction_protocol::TransactionProtocolError};
+use tari_crypto::tari_utilities::ByteArrayError;
 use tari_key_manager::{key_manager::KeyManagerError, mnemonic::MnemonicError};
 use tari_service_framework::reply_channel::TransportChannelError;
-use tari_transactions::transaction_protocol::TransactionProtocolError;
-use tari_utilities::ByteArrayError;
 use time::OutOfRangeError;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum OutputManagerError {
     #[error(msg_embedded, no_from, non_std)]
     BuildError(String),
@@ -39,9 +41,13 @@ pub enum OutputManagerError {
     OutputManagerStorageError(OutputManagerStorageError),
     MnemonicError(MnemonicError),
     KeyManagerError(KeyManagerError),
+    TransactionError(TransactionError),
+    DhtOutboundError(DhtOutboundError),
+    #[error(msg_embedded, no_from, non_std)]
+    ConversionError(String),
     /// Not all the transaction inputs and outputs are present to be confirmed
     IncompleteTransaction,
-    /// Not enough funds to fulfill transaction
+    /// Not enough funds to fulfil transaction
     NotEnoughFunds,
     /// Output already exists
     DuplicateOutput,
@@ -53,6 +59,13 @@ pub enum OutputManagerError {
     UnexpectedApiResponse,
     /// Invalid config provided to Output Manager
     InvalidConfig,
+    /// The response received from another service is an incorrect variant
+    #[error(msg_embedded, no_from, non_std)]
+    InvalidResponseError(String),
+    /// No Base Node public key has been provided for this service to use for contacting a base node
+    NoBaseNodeKeysProvided,
+    /// An error occured sending an event out on the event stream
+    EventStreamError,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -69,5 +82,19 @@ pub enum OutputManagerStorageError {
     OperationNotSupported,
     /// Could not find all values specified for batch operation
     ValuesNotFound,
+    /// Error converting a type
+    ConversionError,
+    /// Output has already been spent
+    OutputAlreadySpent,
+    /// Key Manager not initialized
+    KeyManagerNotInitialized,
     OutOfRangeError(OutOfRangeError),
+    R2d2Error,
+    TransactionError(TransactionError),
+    DieselError(DieselError),
+    DieselConnectionError(diesel::ConnectionError),
+    #[error(msg_embedded, no_from, non_std)]
+    DatabaseMigrationError(String),
+    #[error(msg_embedded, non_std, no_from)]
+    BlockingTaskSpawnError(String),
 }

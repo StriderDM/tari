@@ -31,6 +31,9 @@ pub trait ArrayLike {
     /// Returns the number of hashes stored in the backend
     fn len(&self) -> Result<usize, Self::Error>;
 
+    /// Returns if empty
+    fn is_empty(&self) -> Result<bool, Self::Error>;
+
     /// Store a new item and return the index of the stored item
     fn push(&mut self, item: Self::Value) -> Result<usize, Self::Error>;
 
@@ -43,6 +46,9 @@ pub trait ArrayLike {
 
     /// Remove all stored items from the the backend.
     fn clear(&mut self) -> Result<(), Self::Error>;
+
+    /// Finds the index of the specified stored item, it will return None if the object could not be found.
+    fn position(&self, item: &Self::Value) -> Result<Option<usize>, Self::Error>;
 }
 
 pub trait ArrayLikeExt {
@@ -54,17 +60,24 @@ pub trait ArrayLikeExt {
     /// Shift the array, by discarding the first n elements from the front.
     fn shift(&mut self, n: usize) -> Result<(), MerkleMountainRangeError>;
 
+    /// Store a new item first in the array, previous items will be shifted up to make room.
+    fn push_front(&mut self, item: Self::Value) -> Result<(), MerkleMountainRangeError>;
+
     /// Execute the given closure for each value in the array
     fn for_each<F>(&self, f: F) -> Result<(), MerkleMountainRangeError>
     where F: FnMut(Result<Self::Value, MerkleMountainRangeError>);
 }
 
-impl<T: Clone> ArrayLike for Vec<T> {
+impl<T: Clone + PartialEq> ArrayLike for Vec<T> {
     type Error = MerkleMountainRangeError;
     type Value = T;
 
     fn len(&self) -> Result<usize, Self::Error> {
         Ok(Vec::len(self))
+    }
+
+    fn is_empty(&self) -> Result<bool, Self::Error> {
+        Ok(Vec::is_empty(self))
     }
 
     fn push(&mut self, item: Self::Value) -> Result<usize, Self::Error> {
@@ -84,6 +97,10 @@ impl<T: Clone> ArrayLike for Vec<T> {
         Vec::clear(self);
         Ok(())
     }
+
+    fn position(&self, item: &Self::Value) -> Result<Option<usize>, Self::Error> {
+        Ok(self.iter().position(|stored_item| stored_item == item))
+    }
 }
 
 impl<T: Clone> ArrayLikeExt for Vec<T> {
@@ -97,6 +114,11 @@ impl<T: Clone> ArrayLikeExt for Vec<T> {
     fn shift(&mut self, n: usize) -> Result<(), MerkleMountainRangeError> {
         let drain_n = min(n, self.len());
         self.drain(0..drain_n);
+        Ok(())
+    }
+
+    fn push_front(&mut self, item: Self::Value) -> Result<(), MerkleMountainRangeError> {
+        self.insert(0, item);
         Ok(())
     }
 

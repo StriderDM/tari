@@ -24,7 +24,7 @@ use crate::{comms_connector::PeerMessage, domain_message::DomainMessage};
 use log::*;
 use std::{fmt::Debug, sync::Arc};
 
-const LOG_TARGET: &'static str = "base_layer::p2p::services";
+const LOG_TARGET: &str = "p2p::services";
 
 /// For use with `StreamExt::filter_map`. Log and filter any errors.
 pub async fn ok_or_skip_result<T, E>(res: Result<T, E>) -> Option<T>
@@ -32,7 +32,7 @@ where E: Debug {
     match res {
         Ok(t) => Some(t),
         Err(err) => {
-            error!(target: LOG_TARGET, "{:?}", err);
+            warn!(target: LOG_TARGET, "{:?}", err);
             None
         },
     }
@@ -42,7 +42,8 @@ pub fn map_decode<T>(serialized: Arc<PeerMessage>) -> Result<DomainMessage<T>, p
 where T: prost::Message + Default {
     Ok(DomainMessage {
         source_peer: serialized.source_peer.clone(),
-        origin_pubkey: serialized.dht_header.origin_public_key.clone(),
+        dht_header: serialized.dht_header.clone(),
+        authenticated_origin: serialized.authenticated_origin.clone(),
         inner: serialized.decode_message()?,
     })
 }

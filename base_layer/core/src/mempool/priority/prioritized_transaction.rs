@@ -20,10 +20,9 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::mempool::priority::PriorityError;
+use crate::{mempool::priority::PriorityError, transactions::transaction::Transaction};
 use std::{convert::TryFrom, sync::Arc};
-use tari_transactions::transaction::Transaction;
-use tari_utilities::message_format::MessageFormat;
+use tari_crypto::tari_utilities::message_format::MessageFormat;
 
 /// Create a unique unspent transaction priority based on the transaction fee, maturity of the oldest input UTXO and the
 /// excess_sig. The excess_sig is included to ensure the the priority key unique so it can be used with a BTreeMap.
@@ -33,6 +32,7 @@ pub struct FeePriority(Vec<u8>);
 
 impl FeePriority {
     pub fn try_from(transaction: &Transaction) -> Result<Self, PriorityError> {
+        // The weights have been normalised, so the fee priority is now equal to the fee per gram ± a few pct points
         let fee_per_byte = (transaction.calculate_ave_fee_per_gram() * 1000.0) as usize; // Include 3 decimal places before flooring
         let mut fee_priority = fee_per_byte.to_binary()?;
         fee_priority.reverse(); // Requires Big-endian for BtreeMap sorting

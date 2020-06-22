@@ -23,11 +23,22 @@
 mod blake_pow;
 mod difficulty;
 mod error;
-mod pow;
+mod median_timestamp;
+#[allow(clippy::enum_variant_names)]
+mod monero_rx;
+#[allow(clippy::module_inception)]
+mod proof_of_work;
+mod target_difficulty;
+
+#[cfg(test)]
+pub use blake_pow::test as blake_test;
 
 pub mod lwma_diff;
 
-pub use blake_pow::BlakePow;
-pub use difficulty::Difficulty;
-pub use error::PowError;
-pub use pow::ProofOfWork;
+pub use blake_pow::{blake_difficulty, blake_difficulty_with_hash};
+pub use difficulty::{Difficulty, DifficultyAdjustment};
+pub use error::{DifficultyAdjustmentError, PowError};
+pub use median_timestamp::get_median_timestamp;
+pub use monero_rx::monero_difficulty;
+pub use proof_of_work::{PowAlgorithm, ProofOfWork};
+pub use target_difficulty::get_target_difficulty;

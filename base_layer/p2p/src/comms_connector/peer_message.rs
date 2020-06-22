@@ -20,10 +20,14 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use tari_comms::peer_manager::Peer;
+use log::*;
+use tari_comms::{peer_manager::Peer, types::CommsPublicKey};
 use tari_comms_dht::{domain_message::MessageHeader, envelope::DhtMessageHeader};
 
+const LOG_TARGET: &str = "comms::dht::requests::inbound";
+
 /// A domain-level message
+#[derive(Debug)]
 pub struct PeerMessage {
     /// The message envelope header
     pub dht_header: DhtMessageHeader,
@@ -31,22 +35,25 @@ pub struct PeerMessage {
     pub source_peer: Peer,
     /// Domain message header
     pub message_header: MessageHeader,
+    /// This messages authenticated origin, otherwise None
+    pub authenticated_origin: Option<CommsPublicKey>,
     /// Serialized message data
     pub body: Vec<u8>,
 }
 
 impl PeerMessage {
-    pub fn new(dht_header: DhtMessageHeader, source_peer: Peer, message_header: MessageHeader, body: Vec<u8>) -> Self {
-        Self {
-            body,
-            message_header,
-            dht_header,
-            source_peer,
-        }
-    }
-
     pub fn decode_message<T>(&self) -> Result<T, prost::DecodeError>
     where T: prost::Message + Default {
-        T::decode(&self.body)
+        let msg = T::decode(self.body.as_slice())?;
+        if cfg!(debug_assertions) {
+            trace!(
+                target: LOG_TARGET,
+                "Inbound message: Peer:{}, DhtHeader:{},  {:?}",
+                self.source_peer,
+                self.dht_header,
+                msg
+            );
+        }
+        Ok(msg)
     }
 }

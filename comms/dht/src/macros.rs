@@ -27,24 +27,13 @@ macro_rules! acquire_lock {
     ($e:expr, $m:ident) => {
         match $e.$m() {
             Ok(lock) => lock,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(poisoned) => {
+                log::warn!(target: "comms::dht", "Lock has been POISONED and will be silently recovered");
+                poisoned.into_inner()
+            },
         }
     };
     ($e:expr) => {
         acquire_lock!($e, lock)
-    };
-}
-
-macro_rules! acquire_write_lock {
-    ($e:expr) => {
-        acquire_lock!($e, write)
-    };
-}
-
-/// A small wrapper macro which includes rust files generated from protos
-#[macro_export]
-macro_rules! include_proto_package {
-    ($path:expr) => {
-        include!(concat!(env!("OUT_DIR"), "/", $path, ".rs"));
     };
 }

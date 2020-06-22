@@ -20,10 +20,12 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::mempool::priority::{FeePriority, PriorityError};
+use crate::{
+    mempool::priority::{FeePriority, PriorityError},
+    transactions::transaction::Transaction,
+};
 use std::{convert::TryFrom, sync::Arc};
-use tari_transactions::transaction::Transaction;
-use tari_utilities::message_format::MessageFormat;
+use tari_crypto::tari_utilities::message_format::MessageFormat;
 
 /// Create a unique transaction priority based on the maximum time-lock (lock_height or input UTXO maturity) and the
 /// excess_sig, allowing transactions to be sorted according to their time-lock expiry. The excess_sig is included to
@@ -33,7 +35,7 @@ pub struct TimelockPriority(Vec<u8>);
 
 impl TimelockPriority {
     pub fn try_from(transaction: &Transaction) -> Result<Self, PriorityError> {
-        let mut priority = transaction.max_timelock_height().to_binary()?;
+        let mut priority = transaction.min_spendable_height().to_binary()?;
         priority.reverse(); // Requires Big-endian for BtreeMap sorting
         priority.append(&mut transaction.body.kernels()[0].excess_sig.to_binary()?);
         Ok(Self(priority))
@@ -62,7 +64,7 @@ impl TryFrom<Transaction> for TimelockedTransaction {
         Ok(Self {
             fee_priority: FeePriority::try_from(&transaction)?,
             timelock_priority: TimelockPriority::try_from(&transaction)?,
-            max_timelock_height: match transaction.max_timelock_height() {
+            max_timelock_height: match transaction.min_spendable_height() {
                 0 => 0,
                 v => v - 1,
             },

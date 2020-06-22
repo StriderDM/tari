@@ -28,9 +28,9 @@ use crate::{
         reorg_pool::ReorgPoolError,
         unconfirmed_pool::UnconfirmedPoolError,
     },
+    transactions::transaction::TransactionError,
 };
 use derive_error::Error;
-use tari_transactions::transaction::TransactionError;
 
 #[derive(Debug, Error)]
 pub enum MempoolError {
@@ -42,4 +42,9 @@ pub enum MempoolError {
     ChainStorageError(ChainStorageError),
     /// The Blockchain height is undefined
     ChainHeightUndefined,
+    #[error(msg_embedded, non_std, no_from)]
+    BlockingTaskSpawnError(String),
+    /// A problem has been encountered with the storage backend.
+    #[error(non_std, no_from)]
+    BackendError(String),
 }

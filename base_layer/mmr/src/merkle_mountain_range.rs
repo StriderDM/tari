@@ -19,18 +19,14 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-//
-// Portions of this file were originally copyrighted (c) 2018 The Grin Developers, issued under the Apache License,
-// Version 2.0, available at http://www.apache.org/licenses/LICENSE-2.0.
 
 use crate::{
     backend::ArrayLike,
-    common::{bintree_height, find_peaks, hash_together, leaf_index, n_leaves, peak_map_height},
+    common::{bintree_height, find_peaks, hash_together, is_leaf, leaf_index, n_leaves, node_index, peak_map_height},
     error::MerkleMountainRangeError,
     Hash,
 };
 use digest::Digest;
-use log::*;
 use std::{
     cmp::{max, min},
     marker::PhantomData,
@@ -62,8 +58,8 @@ where
         }
     }
 
-    /// Clears the MMR and restores its state from a set of leaf hashes.
-    pub fn restore(&mut self, leaf_hashes: Vec<Hash>) -> Result<(), MerkleMountainRangeError> {
+    /// Clears the MMR and assigns its state from the list of leaf hashes given in `leaf_hashes`.
+    pub fn assign(&mut self, leaf_hashes: Vec<Hash>) -> Result<(), MerkleMountainRangeError> {
         self.hashes
             .clear()
             .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?;
@@ -99,21 +95,21 @@ where
     }
 
     /// This function returns the hash of the leaf index provided, indexed from 0
-    pub fn get_leaf_hash(&self, leaf_node_index: usize) -> Result<Option<Hash>, MerkleMountainRangeError> {
-        self.get_node_hash(leaf_index(leaf_node_index))
+    pub fn get_leaf_hash(&self, leaf_index: usize) -> Result<Option<Hash>, MerkleMountainRangeError> {
+        self.get_node_hash(node_index(leaf_index))
     }
 
     /// Returns a set of leaf hashes from the MMR.
-    pub fn get_leaf_hashes(&self, index: usize, count: usize) -> Result<Vec<Hash>, MerkleMountainRangeError> {
+    pub fn get_leaf_hashes(&self, leaf_index: usize, count: usize) -> Result<Vec<Hash>, MerkleMountainRangeError> {
         let leaf_count = self.get_leaf_count()?;
-        if index >= leaf_count {
+        if leaf_index >= leaf_count {
             return Ok(Vec::new());
         }
         let count = max(1, count);
-        let last_index = min(index + count - 1, leaf_count);
-        let mut leaf_hashes = Vec::with_capacity((last_index - index + 1) as usize);
-        for index in index..=last_index {
-            if let Some(hash) = self.get_leaf_hash(index)? {
+        let last_leaf_index = min(leaf_index + count - 1, leaf_count);
+        let mut leaf_hashes = Vec::with_capacity((last_leaf_index - leaf_index + 1) as usize);
+        for leaf_index in leaf_index..=last_leaf_index {
+            if let Some(hash) = self.get_leaf_hash(leaf_index)? {
                 leaf_hashes.push(hash);
             }
         }
@@ -184,15 +180,15 @@ where
             if height > 0 {
                 let hash = self
                     .get_node_hash(n)?
-                    .ok_or(MerkleMountainRangeError::CorruptDataStructure)?;
+                    .ok_or_else(|| MerkleMountainRangeError::CorruptDataStructure)?;
                 let left_pos = n - (1 << height);
                 let right_pos = n - 1;
                 let left_child_hash = self
                     .get_node_hash(left_pos)?
-                    .ok_or(MerkleMountainRangeError::CorruptDataStructure)?;
+                    .ok_or_else(|| MerkleMountainRangeError::CorruptDataStructure)?;
                 let right_child_hash = self
                     .get_node_hash(right_pos)?
-                    .ok_or(MerkleMountainRangeError::CorruptDataStructure)?;
+                    .ok_or_else(|| MerkleMountainRangeError::CorruptDataStructure)?;
                 // hash the two child nodes together with parent_pos and compare
                 let hash_check = hash_together::<D>(&left_child_hash, &right_child_hash);
                 if hash_check != hash {
@@ -203,20 +199,27 @@ where
         Ok(())
     }
 
-    /// Search for a given hash in the leaf node array. This is a very slow function, being O(n). In general, it's
-    /// better to cache the index of the hash when storing it rather than using this function, but it's here for
-    /// completeness. The index that is returned is the index of the _leaf node_, and not the MMR node index.
-    pub fn find_leaf_node(&self, hash: &Hash) -> Result<Option<usize>, MerkleMountainRangeError> {
-        for i in 0..self
-            .hashes
-            .len()
-            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))?
-        {
-            if *hash == self.hashes.get_or_panic(i) {
-                return Ok(Some(i));
-            }
-        }
-        Ok(None)
+    /// Search for the node index of the given hash in the MMR. This is a very slow function, being O(n). In general,
+    /// it's better to cache the index of the hash when storing it rather than using this function, but it's here
+    /// for completeness.
+    pub fn find_node_index(&self, hash: &Hash) -> Result<Option<usize>, MerkleMountainRangeError> {
+        self.hashes
+            .position(hash)
+            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))
+    }
+
+    /// Search for the leaf index of the given hash in the leaf nodes of the MMR.
+    pub fn find_leaf_index(&self, hash: &Hash) -> Result<Option<u32>, MerkleMountainRangeError> {
+        Ok(match self.find_node_index(hash)? {
+            Some(node_index) => {
+                if is_leaf(node_index) {
+                    Some(leaf_index(node_index))
+                } else {
+                    None
+                }
+            },
+            None => None,
+        })
     }
 
     pub(crate) fn null_hash() -> Hash {
@@ -224,10 +227,15 @@ where
     }
 
     fn push_hash(&mut self, hash: Hash) -> Result<usize, MerkleMountainRangeError> {
-        self.hashes.push(hash).map_err(|e| {
-            error!(target: LOG_TARGET, "{:?}", e);
-            MerkleMountainRangeError::BackendError(e.to_string())
-        })
+        self.hashes
+            .push(hash)
+            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))
+    }
+
+    pub fn clear(&mut self) -> Result<(), MerkleMountainRangeError> {
+        self.hashes
+            .clear()
+            .map_err(|e| MerkleMountainRangeError::BackendError(e.to_string()))
     }
 }
 
@@ -238,6 +246,6 @@ where
     B2: ArrayLike<Value = Hash>,
 {
     fn eq(&self, other: &MerkleMountainRange<D, B2>) -> bool {
-        (self.get_merkle_root() == other.get_merkle_root())
+        self.get_merkle_root() == other.get_merkle_root()
     }
 }

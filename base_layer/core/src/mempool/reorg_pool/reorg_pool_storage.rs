@@ -20,10 +20,17 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{blocks::Block, mempool::reorg_pool::reorg_pool::ReorgPoolConfig};
+use crate::{
+    blocks::Block,
+    mempool::reorg_pool::reorg_pool::ReorgPoolConfig,
+    transactions::{transaction::Transaction, types::Signature},
+};
+use log::*;
 use std::sync::Arc;
-use tari_transactions::{transaction::Transaction, types::Signature};
+use tari_crypto::tari_utilities::hex::Hex;
 use ttl_cache::TtlCache;
+
+pub const LOG_TARGET: &str = "c::mp::reorg_pool::reorg_pool_storage";
 
 /// Reorg makes use of ReorgPoolStorage to provide thread save access to its TtlCache.
 /// The ReorgPoolStorage consists of all transactions that have recently been added to blocks.
@@ -49,6 +56,12 @@ impl ReorgPoolStorage {
     /// the ReorgPoolStorage and will be discarded once the Time-to-live threshold has been reached.
     pub fn insert(&mut self, tx: Arc<Transaction>) {
         let tx_key = tx.body.kernels()[0].excess_sig.clone();
+        trace!(
+            target: LOG_TARGET,
+            "Inserting tx into reorg pool: {}",
+            tx_key.get_signature().to_hex()
+        );
+        trace!(target: LOG_TARGET, "Transaction inserted: {}", tx);
         let _ = self.txs_by_signature.insert(tx_key, tx, self.config.tx_ttl);
     }
 
@@ -64,13 +77,42 @@ impl ReorgPoolStorage {
         self.txs_by_signature.contains_key(excess_sig)
     }
 
+    /// Remove double-spends from the ReorgPool. These transactions were orphaned by the provided published
+    /// block. Check if any of the transactions in the ReorgPool has inputs that was spent by the provided
+    /// published block.
+    fn discard_double_spends(&mut self, published_block: &Block) {
+        let mut removed_tx_keys: Vec<Signature> = Vec::new();
+        for (tx_key, ptx) in self.txs_by_signature.iter() {
+            for input in ptx.body.inputs() {
+                if published_block.body.inputs().contains(input) {
+                    removed_tx_keys.push(tx_key.clone());
+                }
+            }
+        }
+
+        for tx_key in &removed_tx_keys {
+            trace!(target: LOG_TARGET, "Removed double spends: {:?}", tx_key);
+            self.txs_by_signature.remove(&tx_key);
+        }
+    }
+
     /// Remove the transactions from the ReorgPoolStorage that were used in provided removed blocks. The transactions
     /// can be resubmitted to the Unconfirmed Pool.
-    pub fn scan_for_and_remove_reorged_txs(&mut self, removed_blocks: Vec<Block>) -> Vec<Arc<Transaction>> {
+    pub fn remove_reorged_txs_and_discard_double_spends(
+        &mut self,
+        removed_blocks: Vec<Block>,
+        new_blocks: &Vec<Block>,
+    ) -> Vec<Arc<Transaction>>
+    {
+        for block in new_blocks {
+            self.discard_double_spends(block);
+        }
+
         let mut removed_txs: Vec<Arc<Transaction>> = Vec::new();
         for block in &removed_blocks {
             for kernel in block.body.kernels() {
                 if let Some(removed_tx) = self.txs_by_signature.remove(&kernel.excess_sig) {
+                    trace!(target: LOG_TARGET, "Removing tx from reorg pool: {:?}", removed_tx);
                     removed_txs.push(removed_tx);
                 }
             }
@@ -80,17 +122,18 @@ impl ReorgPoolStorage {
 
     /// Returns the total number of published transactions stored in the ReorgPoolStorage
     pub fn len(&mut self) -> usize {
-        let mut count = 0;
-        self.txs_by_signature.iter().for_each(|_| count += 1);
-        (count)
+        self.txs_by_signature.iter().count()
+    }
+
+    /// Returns all transaction stored in the ReorgPoolStorage.
+    pub fn snapshot(&mut self) -> Vec<Arc<Transaction>> {
+        self.txs_by_signature.iter().map(|(_, tx)| tx).cloned().collect()
     }
 
     /// Returns the total weight of all transactions stored in the pool.
     pub fn calculate_weight(&mut self) -> u64 {
-        let mut weight: u64 = 0;
         self.txs_by_signature
             .iter()
-            .for_each(|(_, tx)| weight += tx.calculate_weight());
-        (weight)
+            .fold(0, |weight, (_, tx)| weight + tx.calculate_weight())
     }
 }

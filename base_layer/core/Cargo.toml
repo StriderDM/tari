@@ -6,31 +6,39 @@ repository = "https://github.com/tari-project/tari"
 homepage = "https://tari.com"
 readme = "README.md"
 license = "BSD-3-Clause"
-version = "0.0.5"
+version = "0.1.0"
 edition = "2018"
 
-[dependencies]
-tari_transactions = { path = "../../base_layer/transactions", version = "^0.0" }
-tari_comms = { version = "^0.0", path = "../../comms"}
-tari_utilities = { path = "../../infrastructure/tari_util", version = "^0.0", features = ["chrono_dt"]}
-tari_infra_derive = { path = "../../infrastructure/derive", version = "^0.0" }
-tari_crypto = { path = "../../infrastructure/crypto", version = "^0.0" }
-tari_storage = { path = "../../infrastructure/storage", version = "^0.0" }
-tari_common = {path = "../../common", version= "^0.0"}
-tari_mmr = { path = "../../base_layer/mmr", version = "^0.0" }
-tari_service_framework = { version = "^0.0", path = "../service_framework"}
-tari_p2p = {path = "../../base_layer/p2p", version = "^0.0"}
-tari_comms_dht = { version = "^0.0", path = "../../comms/dht"}
-tari_broadcast_channel = { version="^0.0",  path = "../../infrastructure/broadcast_channel" }
-tari_pubsub = { version = "^0.0", path = "../../infrastructure/pubsub"}
-tari_shutdown = { path = "../../infrastructure/shutdown", version = "^0.0"}
+[features]
+default = ["croaring", "tari_mmr", "transactions", "base_node", "mempool_proto", "base_node_proto", "monero"]
+monero_merge_mining = ["croaring", "tari_mmr", "transactions", "base_node", "mempool_proto", "base_node_proto", "monero", "randomx-rs"]
+transactions = []
+mempool_proto = []
+base_node = []
+base_node_proto = []
+avx2 = ["tari_crypto/avx2"]
 
+[dependencies]
+tari_comms = { version = "^0.1", path = "../../comms"}
+tari_infra_derive = {  version = "^0.0", path = "../../infrastructure/derive" }
+tari_crypto = { version = "^0.3" }
+tari_storage = { version = "^0.1", path = "../../infrastructure/storage" }
+tari_common = { version= "^0.1", path = "../../common"}
+tari_service_framework = { version = "^0.0", path = "../service_framework"}
+tari_p2p = { version = "^0.1", path = "../../base_layer/p2p" }
+tari_comms_dht = { version = "^0.1", path = "../../comms/dht"}
+tari_broadcast_channel = "^0.2"
+tari_shutdown = { version = "^0.0", path = "../../infrastructure/shutdown" }
+tari_mmr = { version = "^0.1", path = "../../base_layer/mmr", optional = true }
+randomx-rs = { version = "0.2.1", optional = true }
+monero = { version = "0.5", features= ["serde_support"], optional = true }
 bitflags = "1.0.4"
 chrono = { version = "0.4.6", features = ["serde"]}
 digest = "0.8.0"
 derive-error = "0.0.4"
-rand = "0.5.5"
-serde = { version = "1.0.97", features = ["derive"] }
+thiserror = "1.0.15"
+rand = "0.7.2"
+serde = { version = "1.0.106", features = ["derive"] }
 rmp-serde = "0.13.7"
 base64 = "0.10.1"
 serde_json = "1.0"
@@ -40,23 +48,30 @@ arrayref = "0.3.5"
 bincode = "1.1.4"
 log = "0.4"
 blake2 = "^0.8.0"
-bigint = "^4.4.1"
+uint = { version = "0.8", default-features = false }
 ttl_cache = "0.5.1"
-croaring = "=0.3.9"
-tokio = { version="^0.2.0-alpha.6" }
-tokio-executor = { version ="^0.2.0-alpha.6", features = ["threadpool"] }
-futures-preview = {version = "0.3.0-alpha.19", features = ["async-await"] }
+tokio = { version="^0.2", features = ["blocking", "time", "sync"] }
+futures = {version = "^0.3.1", features = ["async-await"] }
 lmdb-zero = "0.4.4"
 tower-service = { version="0.3.0-alpha.2" }
 crossbeam-channel = "0.3.8"
-prost = "0.5.0"
+prost = "0.6.1"
 bytes = "0.4.12"
-prost-types = "0.5.0"
+prost-types = "0.6.1"
+cfg-if = "0.1.10"
+croaring = { version = "=0.3.9", optional = true }
+config = { version = "0.9.3" }
+strum = "0.17.1"
+strum_macros = "0.17.1"
 
 [dev-dependencies]
-env_logger = "0.7.0"
+tari_p2p = {path = "../../base_layer/p2p", version = "^0.1", features=["test-mocks"]}
 tari_test_utils = { path = "../../infrastructure/test_utils", version = "^0.0" }
+env_logger = "0.7.0"
 tempdir = "0.3.7"
+tokio-macros = "0.2.4"
+tari_wallet = { path = "../../base_layer/wallet", version = "^0.1" }
+tokio-test = "0.2.0"
 
 [build-dependencies]
-tari_protobuf_build = { version = "^0.0", path="../../infrastructure/protobuf_build"}
+tari_common = { version = "^0.1", path="../../common"}

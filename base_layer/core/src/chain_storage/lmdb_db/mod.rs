@@ -21,6 +21,7 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 mod lmdb;
+#[allow(clippy::module_inception)]
 mod lmdb_db;
 mod lmdb_vec;
 
@@ -36,11 +37,6 @@ pub const LMDB_DB_TXOS_HASH_TO_INDEX: &str = "txos_hash_to_index";
 pub const LMDB_DB_STXOS: &str = "stxos";
 pub const LMDB_DB_KERNELS: &str = "kernels";
 pub const LMDB_DB_ORPHANS: &str = "orphans";
-pub const LMDB_DB_UTXO_MMR_BASE_BACKEND: &str = "utxo_mmr_base_backend";
 pub const LMDB_DB_UTXO_MMR_CP_BACKEND: &str = "utxo_mmr_cp_backend";
-pub const LMDB_DB_HEADER_MMR_BASE_BACKEND: &str = "header_mmr_base_backend";
-pub const LMDB_DB_HEADER_MMR_CP_BACKEND: &str = "header_mmr_cp_backend";
-pub const LMDB_DB_KERNEL_MMR_BASE_BACKEND: &str = "kernel_mmr_base_backend";
 pub const LMDB_DB_KERNEL_MMR_CP_BACKEND: &str = "kernel_mmr_cp_backend";
-pub const LMDB_DB_RANGE_PROOF_MMR_BASE_BACKEND: &str = "range_proof_mmr_base_backend";
 pub const LMDB_DB_RANGE_PROOF_MMR_CP_BACKEND: &str = "range_proof_mmr_cp_backend";

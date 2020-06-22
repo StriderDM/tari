@@ -21,15 +21,14 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{inbound::DhtInboundMessage, proto::envelope::DhtEnvelope};
-use futures::{task::Context, Future, Poll};
+use futures::{task::Context, Future};
 use log::*;
 use prost::Message;
-use std::convert::TryInto;
-use tari_comms::message::InboundMessage;
-use tari_comms_middleware::MiddlewareError;
+use std::{convert::TryInto, task::Poll};
+use tari_comms::{message::InboundMessage, pipeline::PipelineError};
 use tower::{layer::Layer, Service, ServiceExt};
 
-const LOG_TARGET: &'static str = "comms::dht::deserialize";
+const LOG_TARGET: &str = "comms::dht::deserialize";
 
 /// # DHT Deserialization middleware
 ///
@@ -48,11 +47,9 @@ impl<S> DhtDeserializeMiddleware<S> {
 }
 
 impl<S> Service<InboundMessage> for DhtDeserializeMiddleware<S>
-where
-    S: Service<DhtInboundMessage, Response = ()> + Clone + 'static,
-    S::Error: Into<MiddlewareError>,
+where S: Service<DhtInboundMessage, Response = (), Error = PipelineError> + Clone + 'static
 {
-    type Error = MiddlewareError;
+    type Error = PipelineError;
     type Response = ();
 
     type Future = impl Future<Output = Result<Self::Response, Self::Error>>;
@@ -61,49 +58,51 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, msg: InboundMessage) -> Self::Future {
-        Self::deserialize(self.next_service.clone(), msg)
-    }
-}
+    fn call(&mut self, message: InboundMessage) -> Self::Future {
+        let next_service = self.next_service.clone();
+        async move {
+            trace!(target: LOG_TARGET, "Deserializing InboundMessage {}", message.tag);
 
-impl<S> DhtDeserializeMiddleware<S>
-where
-    S: Service<DhtInboundMessage, Response = ()>,
-    S::Error: Into<MiddlewareError>,
-{
-    pub async fn deserialize(mut next_service: S, message: InboundMessage) -> Result<(), MiddlewareError> {
-        trace!(target: LOG_TARGET, "Deserializing InboundMessage");
-        next_service.ready().await.map_err(Into::into)?;
+            let InboundMessage {
+                source_peer,
+                mut body,
+                tag,
+                ..
+            } = message;
 
-        let InboundMessage { source_peer, body, .. } = message;
+            if body.is_empty() {
+                return Err(format!("Received empty message from peer '{}'", source_peer)
+                    .as_str()
+                    .into());
+            }
 
-        match DhtEnvelope::decode(&body) {
-            Ok(dht_envelope) => {
-                trace!(target: LOG_TARGET, "Deserialization succeeded. Checking signatures");
-                if !dht_envelope.is_signature_valid() {
-                    // The origin signature is not valid, this message should never have been sent
-                    warn!(
-                        target: LOG_TARGET,
-                        "SECURITY: Origin signature verification failed. Discarding message from NodeId {}",
-                        source_peer.node_id
+            match DhtEnvelope::decode(&mut body) {
+                Ok(dht_envelope) => {
+                    let inbound_msg = DhtInboundMessage::new(
+                        tag,
+                        dht_envelope.header.try_into().map_err(PipelineError::from_debug)?,
+                        source_peer,
+                        dht_envelope.body,
                     );
-                    return Ok(());
-                }
+                    trace!(
+                        target: LOG_TARGET,
+                        "Deserialization succeeded. Passing message {} onto next service (Trace: {})",
+                        tag,
+                        inbound_msg.dht_header.message_tag
+                    );
 
-                trace!(target: LOG_TARGET, "Origin signature validation passed.");
-
-                let inbound_msg =
-                    DhtInboundMessage::new(dht_envelope.header.try_into()?, source_peer, dht_envelope.body);
-                next_service.call(inbound_msg).await.map_err(Into::into)
-            },
-            Err(err) => {
-                error!(target: LOG_TARGET, "DHT deserialization failed: {}", err);
-                Err(err.into())
-            },
+                    next_service.oneshot(inbound_msg).await
+                },
+                Err(err) => {
+                    error!(target: LOG_TARGET, "DHT deserialization failed: {}", err);
+                    Err(PipelineError::from_debug(err))
+                },
+            }
         }
     }
 }
 
+#[derive(Default)]
 pub struct DeserializeLayer;
 
 impl DeserializeLayer {
@@ -128,23 +127,28 @@ mod test {
         test_utils::{make_comms_inbound_message, make_dht_envelope, make_node_identity, service_spy},
     };
     use futures::executor::block_on;
-    use tari_comms::message::{MessageExt, MessageFlags};
+    use tari_comms::message::{MessageExt, MessageTag};
     use tari_test_utils::panic_context;
 
     #[test]
     fn deserialize() {
         let spy = service_spy();
-        let mut deserialize = DeserializeLayer::new().layer(spy.to_service::<MiddlewareError>());
+        let mut deserialize = DeserializeLayer::new().layer(spy.to_service::<PipelineError>());
 
         panic_context!(cx);
 
         assert!(deserialize.poll_ready(&mut cx).is_ready());
         let node_identity = make_node_identity();
-        let dht_envelope = make_dht_envelope(&node_identity, b"A".to_vec(), DhtMessageFlags::empty());
+        let dht_envelope = make_dht_envelope(
+            &node_identity,
+            b"A".to_vec(),
+            DhtMessageFlags::empty(),
+            false,
+            MessageTag::new(),
+        );
         block_on(deserialize.call(make_comms_inbound_message(
             &node_identity,
-            dht_envelope.to_encoded_bytes().unwrap(),
-            MessageFlags::empty(),
+            dht_envelope.to_encoded_bytes().into(),
         )))
         .unwrap();
 

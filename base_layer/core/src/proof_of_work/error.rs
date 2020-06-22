@@ -26,9 +26,13 @@ use derive_error::Error;
 pub enum PowError {
     // ProofOfWorkFailed
     InvalidProofOfWork,
+    // Target difficulty not achieved
+    AchievedDifficultyTooLow,
+    // Invalid target difficulty
+    InvalidTargetDifficulty,
 }
 
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, PartialEq)]
 pub enum DifficultyAdjustmentError {
     // Accumulated difficulty values can only strictly increase
     DecreasingAccumulatedDifficulty,

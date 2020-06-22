@@ -20,15 +20,24 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-/// Creates a setter function used with the builder pattern
+/// Creates a setter function used with the builder pattern.
+/// The value is moved into the function and returned out.
 macro_rules! setter {
- ($func:ident, $name: ident, Option<$type: ty>) => {
+    (
+     $(#[$outer:meta])*
+     $func:ident, $name: ident, Option<$type: ty>
+ ) => {
+        $(#[$outer])*
         pub fn $func(mut self, val: $type) -> Self {
             self.$name = Some(val);
             self
         }
     };
- ($func:ident, $name: ident, $type: ty) => {
+    (
+        $(#[$outer:meta])*
+        $func:ident, $name: ident, $type: ty
+    ) => {
+        $(#[$outer])*
         pub fn $func(mut self, val: $type) -> Self {
             self.$name = val;
             self
@@ -36,21 +45,45 @@ macro_rules! setter {
     };
 }
 
-macro_rules! acquire_lock {
-    ($e:expr, $m:ident) => {
-        match $e.$m() {
-            Ok(lock) => lock,
-            Err(poisoned) => poisoned.into_inner(),
+/// Creates a setter function used with the builder pattern
+/// A mutable reference is taken and returned
+macro_rules! setter_mut {
+    ($func:ident, $name: ident, Option<$type: ty>) => {
+        #[allow(dead_code)]
+        #[allow(unused_doc_comments)]
+        pub fn $func(&mut self, val: $type) -> &mut Self {
+            self.$name = Some(val);
+            self
         }
     };
-    ($e:expr) => {
-        acquire_lock!($e, lock)
+    ($func:ident, $name: ident, $type: ty) => {
+        #[allow(dead_code)]
+        #[allow(unused_doc_comments)]
+        pub fn $func(&mut self, val: $type) -> &mut Self {
+            self.$name = val;
+            self
+        }
     };
 }
 
-macro_rules! acquire_write_lock {
+macro_rules! recover_lock {
     ($e:expr) => {
-        acquire_lock!($e, write)
+        match $e {
+            Ok(lock) => lock,
+            Err(poisoned) => {
+                log::warn!(target: "comms", "Lock has been POISONED and will be silently recovered");
+                poisoned.into_inner()
+            },
+        }
+    };
+}
+
+macro_rules! acquire_lock {
+    ($e:expr, $m:ident) => {
+        recover_lock!($e.$m())
+    };
+    ($e:expr) => {
+        recover_lock!($e.lock())
     };
 }
 
@@ -60,39 +93,73 @@ macro_rules! acquire_read_lock {
     };
 }
 
+macro_rules! acquire_write_lock {
+    ($e:expr) => {
+        acquire_lock!($e, write)
+    };
+}
+
 /// Log an error if an `Err` is returned from the `$expr`. If the given expression is `Ok(v)`,
 /// `Some(v)` is returned, otherwise `None` is returned (same as `Result::ok`).
 /// Useful in cases where the error should be logged and ignored.
 /// instead of writing `if let Err(err) = my_error_call() { error!(...) }`, you can write
-/// `log_if_error(my_error_call())` ```edition2018
-/// # use futures::channel::oneshot;
-/// # use tari_comms::log_if_error;
-/// let (tx, _) = oneshot::channel();
-/// // Sending on oneshot will fail because the receiver is dropped. This error will be logged.
-/// let opt = log_if_error!(target: "debugging", "Error sending reply: {}", tx.send("my reply"));
+/// `log_if_error!(my_error_call())`
+///
+/// ```edition2018,no_compile
+/// # use tari_common::log_if_error;
+/// let opt = log_if_error!(target: "docs", level: debug, Result::<(), _>::Err("this will be logged as 'error' tag"), "Error: {error}");
 /// assert_eq!(opt, None);
 /// ```
 #[macro_export]
 macro_rules! log_if_error {
-    (target: $target:expr, $msg:expr, $expr:expr, no_fmt_msg=true$(,)*) => {{
+    (level:$level:ident, target:$target:expr, $expr:expr, $msg:expr, $($args:tt),* $(,)*) => {{
         match $expr {
             Ok(v) => Some(v),
             Err(err) => {
-                log::error!(target: $target, $msg);
+                log::$level!(target: $target, $msg, $($args,)* error = err);
                 None
             }
         }
     }};
-    (target: $target:expr, $msg:expr, $expr:expr) => {{
+    (target:$target:expr, $expr:expr, $msg:expr, $($args:tt),* $(,)*) => {{
+        log_if_error!(level:warn, target:$target, $expr, $msg, $($args),*)
+    }};
+    (level:$level:ident, $expr:expr, $msg:expr, $($args:tt),* $(,)*) => {{
+        log_if_error!(level:$level, target:"$crate", $expr, $msg, $($args),*)
+    }};
+    ($expr:expr, $msg:expr, $($args:tt)* $(,)*) => {{
+        log_if_error!(level:warn, target:"$crate", $expr, $msg, $($args),*)
+    }};
+}
+
+#[macro_export]
+macro_rules! log_if_error_fmt {
+    (level: $level:ident, target: $target:expr, $expr:expr, $($args:tt)+) => {{
         match $expr {
             Ok(v) => Some(v),
-            Err(err) => {
-                log::error!(target: $target, $msg, err);
+            Err(_) => {
+                log::$level!(target: $target, $($args)+);
                 None
             }
         }
     }};
-    ($msg:expr, $expr:expr) => {{
-        log_if_error!(target: "$crate", $msg, $expr)
+    (level:$level:ident, $expr:expr, $($args:tt)+) => {{
+        log_if_error_fmt!(level:$level, target: "$crate", $expr, $($args)+)
     }};
+    (target: $target:expr, $expr:expr , $($args:tt)+) => {{
+        log_if_error_fmt!(level:error, target: $target, $expr, $($args)+)
+    }};
+    ($msg:expr, $expr:expr, $($args:tt)+) => {{
+        log_if_error_fmt!(level:error, target: "$crate", $expr, $($args)+)
+    }};
+}
+
+/// Add `#[cfg(test)]` attribute to items
+macro_rules! cfg_test {
+     ($($item:item)*) => {
+        $(
+            #[cfg(test)]
+            $item
+        )*
+    }
 }

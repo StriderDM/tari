@@ -70,7 +70,7 @@ impl Shutdown {
     pub fn trigger(&mut self) -> Result<(), ()> {
         match self.trigger.take() {
             Some(trigger) => {
-                trigger.send(()).map_err(|_| ())?;
+                trigger.send(())?;
 
                 if let Some(on_triggered) = self.on_triggered.take() {
                     on_triggered();
@@ -90,6 +90,12 @@ impl Shutdown {
 impl Drop for Shutdown {
     fn drop(&mut self) {
         let _ = self.trigger();
+    }
+}
+
+impl Default for Shutdown {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -115,7 +121,6 @@ mod test {
         // Shutdown::trigger is idempotent
         shutdown.trigger().unwrap();
         assert_eq!(shutdown.is_triggered(), true);
-        rt.shutdown_on_idle();
     }
 
     #[test]
@@ -129,7 +134,6 @@ mod test {
             signal.await.unwrap();
         });
         shutdown.trigger().unwrap();
-        rt.shutdown_on_idle();
     }
 
     #[test]
@@ -143,7 +147,6 @@ mod test {
             signal.await.unwrap();
         });
         drop(shutdown);
-        rt.shutdown_on_idle();
     }
 
     #[test]
@@ -161,6 +164,5 @@ mod test {
         });
         shutdown.trigger().unwrap();
         assert_eq!(spy.load(Ordering::SeqCst), true);
-        rt.shutdown_on_idle();
     }
 }

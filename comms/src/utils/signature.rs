@@ -20,17 +20,14 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{
-    message::MessageError,
-    types::{Challenge, CommsPublicKey},
-};
+use crate::types::{Challenge, CommsPublicKey};
 use digest::Digest;
 use rand::{CryptoRng, Rng};
 use tari_crypto::{
     keys::{PublicKey, SecretKey},
     signatures::{SchnorrSignature, SchnorrSignatureError},
+    tari_utilities::message_format::MessageFormat,
 };
-use tari_utilities::message_format::MessageFormat;
 
 pub fn sign<R, B>(
     rng: &mut R,
@@ -47,10 +44,13 @@ where
 }
 
 /// Verify that the signature is valid for the message body
-pub fn verify<B>(public_key: &CommsPublicKey, signature: &[u8], body: B) -> Result<bool, MessageError>
+pub fn verify<B>(public_key: &CommsPublicKey, signature: &[u8], body: B) -> bool
 where B: AsRef<[u8]> {
-    let signature = SchnorrSignature::<CommsPublicKey, <CommsPublicKey as PublicKey>::K>::from_binary(signature)
-        .map_err(MessageError::MessageFormatError)?;
-    let challenge = Challenge::new().chain(body).result().to_vec();
-    Ok(signature.verify_challenge(public_key, &challenge))
+    match SchnorrSignature::<CommsPublicKey, <CommsPublicKey as PublicKey>::K>::from_binary(signature) {
+        Ok(signature) => {
+            let challenge = Challenge::new().chain(body).result().to_vec();
+            signature.verify_challenge(public_key, &challenge)
+        },
+        Err(_) => false,
+    }
 }

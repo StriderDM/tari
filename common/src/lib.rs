@@ -31,92 +31,61 @@
 //!
 //! 1. Command-line argument
 //! 2. Environment variable
-//! 3. `config.toml` file value
+//! 3. `config.toml` file value (see details: [configuration])
 //! 4. Configuration default
 //!
 //! The utilities exposed in this crate are opinionated, but flexible. In general, all data is stored in a `.tari`
 //! folder under your home folder.
 //!
-//! ### Example - Loading and deserializing the global config file
+//! ## Custom application configuration
+//!
+//! Tari configuration file allows adding custom application specific sections. Tari is using [config] crate
+//! to load configurations and gives access to [`config::Config`] struct so that apps might be flexible.
+//! Though as tari apps follow certain configurability assumptions, tari_common provides helper traits
+//! which automate those with minimal code.
+//!
+//! ## CLI helpers
+//!
+//! Bootstrapping tari configuration files might be customized via CLI or env settings. To help with building
+//! tari-enabled CLI from scratch as easy as possible this crate exposes [ConfigBootstrap] struct which
+//! implements [structopt::StructOpt] trait and can be easily reused in any CLI.
+//!
+//! ## Example - CLI which is loading and deserializing the global config file
 //!
 //! ```edition2018
 //! # use tari_common::*;
-//! let config = default_config();
-//! let config = GlobalConfig::convert_from(config).unwrap();
-//! assert_eq!(config.network, Network::MainNet);
-//! assert_eq!(config.blocking_threads, 4);
+//! # use tari_test_utils::random::string;
+//! # use tempdir::TempDir;
+//! # use structopt::StructOpt;
+//! let mut args = ConfigBootstrap::from_args();
+//! # let temp_dir = TempDir::new(string(8).as_str()).unwrap();
+//! # args.base_path = temp_dir.path().to_path_buf();
+//! # args.init = true;
+//! args.init_dirs();
+//! let config = args.load_configuration().unwrap();
+//! let global = GlobalConfig::convert_from(config).unwrap();
+//! assert_eq!(global.network, Network::Rincewind);
+//! assert_eq!(global.blocking_threads, 4);
+//! # std::fs::remove_dir_all(temp_dir).unwrap();
 //! ```
 
-use clap::ArgMatches;
-use std::path::{Path, PathBuf};
-
-mod configuration;
+pub mod configuration;
+#[macro_use]
 mod logging;
+
+pub mod protobuf_build;
+pub use configuration::error::ConfigError;
 
 pub mod dir_utils;
 pub use configuration::{
-    default_config,
-    install_default_config_file,
-    load_configuration,
-    ConfigurationError,
-    DatabaseType,
-    GlobalConfig,
-    Network,
+    bootstrap::{install_configuration, ConfigBootstrap},
+    global::{CommsTransport, DatabaseType, GlobalConfig, Network, SocksAuthentication, TorControlAuthentication},
+    loader::{ConfigLoader, ConfigPath, ConfigurationError, DefaultConfigLoader, NetworkConfigPath},
+    utils::{default_config, install_default_config_file, load_configuration},
 };
 pub use logging::initialize_logging;
 
 pub const DEFAULT_CONFIG: &str = "config.toml";
 pub const DEFAULT_LOG_CONFIG: &str = "log4rs.yml";
 
-/// A minimal parsed configuration object that's used to bootstrap the main Configuration.
-pub struct ConfigBootstrap {
-    pub config: PathBuf,
-    /// The path to the log configuration file. It is set using the following precedence set:
-    ///   1. from the command-line parameter,
-    ///   2. from the `TARI_LOG_CONFIGURATION` environment variable,
-    ///   3. from a default value, usually `~/.tari/log4rs.yml` (or OS equivalent).
-    pub log_config: PathBuf,
-}
-
-impl Default for ConfigBootstrap {
-    fn default() -> Self {
-        ConfigBootstrap {
-            config: dir_utils::default_path(DEFAULT_CONFIG),
-            log_config: dir_utils::default_path(DEFAULT_LOG_CONFIG),
-        }
-    }
-}
-
-pub fn bootstrap_config_from_cli(matches: &ArgMatches) -> ConfigBootstrap {
-    let config = matches
-        .value_of("config")
-        .map(PathBuf::from)
-        .unwrap_or(dir_utils::default_path(DEFAULT_CONFIG));
-    let log_config = matches.value_of("log_config").map(PathBuf::from);
-    let log_config = logging::get_log_configuration_path(log_config);
-
-    if !config.exists() && matches.is_present("init") {
-        println!("Installing new config file at {}", config.to_str().unwrap_or("[??]"));
-        install_configuration(&config, configuration::install_default_config_file);
-    }
-
-    if !log_config.exists() && matches.is_present("init") {
-        println!(
-            "Installing new logfile configuration at {}",
-            log_config.to_str().unwrap_or("[??]")
-        );
-        install_configuration(&log_config, logging::install_default_logfile_config);
-    }
-    ConfigBootstrap { config, log_config }
-}
-
-pub fn install_configuration<F>(path: &Path, installer: F)
-where F: Fn(&Path) -> Result<u64, std::io::Error> {
-    if let Err(e) = installer(path) {
-        println!(
-            "We could not install a new configuration file in {}: {}",
-            path.to_str().unwrap_or("?"),
-            e.to_string()
-        )
-    }
-}
+pub(crate) const LOG_TARGET: &str = "common::config";

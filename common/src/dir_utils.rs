@@ -20,14 +20,16 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::{io::ErrorKind, path::PathBuf};
+use path_clean::PathClean;
+use std::path::PathBuf;
 
 /// Create the default data directory (`~/.tari` on OSx and Linux, for example) if it doesn't already exist
-pub fn create_data_directory() -> Result<(), std::io::Error> {
-    let mut home = dirs::home_dir().ok_or(std::io::Error::from(ErrorKind::NotFound))?;
-    home.push(".tari");
+pub fn create_data_directory(base_dir: Option<&PathBuf>) -> Result<(), std::io::Error> {
+    let home = default_path("", base_dir);
+
     if !home.exists() {
-        std::fs::create_dir(home)
+        println!("Creating {:?}", home);
+        std::fs::create_dir_all(home)
     } else {
         Ok(())
     }
@@ -38,16 +40,64 @@ pub fn create_data_directory() -> Result<(), std::io::Error> {
 /// # Panics
 /// This function panics if the home folder location cannot be found or if the path value is not valid UTF-8.
 /// This is a trade-off made in favour of convenience of use.
-pub fn default_subdir(path: &str) -> String {
-    let mut home = dirs::home_dir().expect("Home folder location failed");
-    home.push(".tari");
-    home.push(path);
+pub fn default_subdir(path: &str, base_dir: Option<&PathBuf>) -> String {
+    let home = default_path(path, base_dir);
     String::from(home.to_str().expect("Invalid path value"))
 }
 
-pub fn default_path(filename: &str) -> PathBuf {
-    let mut home = dirs::home_dir().unwrap_or(PathBuf::from("."));
-    home.push(".tari");
+pub fn default_path(filename: &str, base_path: Option<&PathBuf>) -> PathBuf {
+    let mut home = base_path.cloned().unwrap_or_else(|| {
+        let mut home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.push(".tari");
+        home
+    });
     home.push(filename);
     home
+}
+
+pub fn absolute_path<P>(path: P) -> PathBuf
+where P: AsRef<std::path::Path> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    }
+    .clean()
+}
+
+#[cfg(test)]
+mod test {
+    use crate::dir_utils;
+    use std::path::PathBuf;
+    use tari_test_utils::random::string;
+    use tempdir::TempDir;
+
+    #[test]
+    fn test_multiple_levels_create_data_directory() {
+        let temp_dir = TempDir::new(string(8).as_str()).unwrap();
+        let dir = &PathBuf::from(
+            temp_dir.path().to_path_buf().display().to_string().to_owned() +
+                "/" +
+                &(0..12)
+                    .collect::<Vec<usize>>()
+                    .iter()
+                    .map(|_| string(2))
+                    .collect::<Vec<std::string::String>>()
+                    .join("/") +
+                "/",
+        );
+
+        assert_eq!(std::path::Path::new(&dir.display().to_string()).exists(), false);
+        dir_utils::create_data_directory(Some(&dir)).unwrap();
+        assert_eq!(std::path::Path::new(&dir.display().to_string()).exists(), true);
+    }
+
+    #[test]
+    fn test_absolute_path_from_relative_path() {
+        let current_path = std::env::current_dir().unwrap_or_default();
+        let relative_path = PathBuf::from("./01/02/");
+        let joined_path = current_path.join(&relative_path);
+        assert_eq!(dir_utils::absolute_path(&relative_path), joined_path);
+    }
 }

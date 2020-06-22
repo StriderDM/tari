@@ -23,28 +23,50 @@
 use self::outbound::OutboundMessageRequester;
 use crate::{
     actor::{DhtActor, DhtRequest, DhtRequester},
+    connectivity::DhtConnectivity,
     discovery::{DhtDiscoveryRequest, DhtDiscoveryRequester, DhtDiscoveryService},
     inbound,
     inbound::{DecryptedDhtMessage, DhtInboundMessage},
+    logging_middleware::MessageLoggingLayer,
     outbound,
     outbound::DhtOutboundRequest,
     proto::envelope::DhtMessageType,
+    storage::{DbConnection, StorageError},
     store_forward,
+    store_forward::{StoreAndForwardError, StoreAndForwardRequest, StoreAndForwardRequester, StoreAndForwardService},
+    tower_filter,
+    DedupLayer,
+    DhtActorError,
     DhtConfig,
 };
 use futures::{channel::mpsc, future, Future};
 use log::*;
 use std::sync::Arc;
 use tari_comms::{
-    message::InboundMessage,
-    outbound_message_service::OutboundMessage,
+    connectivity::ConnectivityRequester,
+    message::{InboundMessage, OutboundMessage},
     peer_manager::{NodeIdentity, PeerFeatures, PeerManager},
+    pipeline::PipelineError,
 };
-use tari_comms_middleware::MiddlewareError;
 use tari_shutdown::ShutdownSignal;
-use tokio::runtime::TaskExecutor;
+use thiserror::Error;
 use tower::{layer::Layer, Service, ServiceBuilder};
-use tower_filter::error::Error as FilterError;
+
+const LOG_TARGET: &str = "comms::dht";
+
+const DHT_ACTOR_CHANNEL_SIZE: usize = 100;
+const DHT_DISCOVERY_CHANNEL_SIZE: usize = 100;
+const DHT_SAF_SERVICE_CHANNEL_SIZE: usize = 100;
+
+#[derive(Debug, Error)]
+pub enum DhtInitializationError {
+    #[error("Database initialization failed: {0}")]
+    DatabaseMigrationFailed(#[from] StorageError),
+    #[error("StoreAndForwardInitializationError: {0}")]
+    StoreAndForwardInitializationError(#[from] StoreAndForwardError),
+    #[error("DhtActorInitializationError: {0}")]
+    DhtActorInitializationError(#[from] DhtActorError),
+}
 
 /// Responsible for starting the DHT actor, building the DHT middleware stack and as a factory
 /// for producing DHT requesters.
@@ -56,55 +78,71 @@ pub struct Dht {
     /// Dht configuration
     config: DhtConfig,
     /// Used to create a OutboundMessageRequester.
-    outbound_sender: mpsc::Sender<DhtOutboundRequest>,
-    /// Receiver for DHT outbound requests.
-    outbound_receiver: Option<mpsc::Receiver<DhtOutboundRequest>>,
+    outbound_tx: mpsc::Sender<DhtOutboundRequest>,
     /// Sender for DHT requests
     dht_sender: mpsc::Sender<DhtRequest>,
-    /// Sender for DHT requests
+    /// Sender for SAF requests
+    saf_sender: mpsc::Sender<StoreAndForwardRequest>,
+    /// Sender for DHT discovery requests
     discovery_sender: mpsc::Sender<DhtDiscoveryRequest>,
+    /// Connectivity actor requester
+    connectivity: ConnectivityRequester,
 }
 
 impl Dht {
-    pub fn new(
+    pub async fn initialize(
         config: DhtConfig,
-        executor: TaskExecutor,
         node_identity: Arc<NodeIdentity>,
         peer_manager: Arc<PeerManager>,
+        outbound_tx: mpsc::Sender<DhtOutboundRequest>,
+        connectivity: ConnectivityRequester,
         shutdown_signal: ShutdownSignal,
-    ) -> Self
+    ) -> Result<Self, DhtInitializationError>
     {
-        let (outbound_sender, outbound_receiver) = mpsc::channel(config.outbound_buffer_size);
-        let (dht_sender, dht_receiver) = mpsc::channel(10);
-        let (discovery_sender, discovery_receiver) = mpsc::channel(10);
+        let (dht_sender, dht_receiver) = mpsc::channel(DHT_ACTOR_CHANNEL_SIZE);
+        let (discovery_sender, discovery_receiver) = mpsc::channel(DHT_DISCOVERY_CHANNEL_SIZE);
+        let (saf_sender, saf_receiver) = mpsc::channel(DHT_SAF_SERVICE_CHANNEL_SIZE);
 
         let dht = Self {
             node_identity,
             peer_manager,
             config,
-            outbound_sender,
-            outbound_receiver: Some(outbound_receiver),
+            outbound_tx,
             dht_sender,
+            saf_sender,
+            connectivity,
             discovery_sender,
         };
 
-        executor.spawn(dht.actor(dht_receiver, shutdown_signal.clone()).run());
-        executor.spawn(dht.discovery_service(discovery_receiver, shutdown_signal).run());
+        let conn = DbConnection::connect_and_migrate(dht.config.database_url.clone())
+            .await
+            .map_err(DhtInitializationError::DatabaseMigrationFailed)?;
 
-        dht
+        dht.connectivity_service(shutdown_signal.clone()).spawn();
+        dht.store_and_forward_service(conn.clone(), saf_receiver, shutdown_signal.clone())
+            .spawn();
+        dht.actor(conn, dht_receiver, shutdown_signal.clone()).spawn();
+        dht.discovery_service(discovery_receiver, shutdown_signal).spawn();
+
+        debug!(target: LOG_TARGET, "Dht initialization complete.");
+
+        Ok(dht)
     }
 
     /// Create a DHT actor
     fn actor(
         &self,
+        conn: DbConnection,
         request_receiver: mpsc::Receiver<DhtRequest>,
         shutdown_signal: ShutdownSignal,
-    ) -> DhtActor<'static>
+    ) -> DhtActor
     {
         DhtActor::new(
             self.config.clone(),
+            conn,
             Arc::clone(&self.node_identity),
             Arc::clone(&self.peer_manager),
+            self.connectivity.clone(),
             self.outbound_requester(),
             request_receiver,
             shutdown_signal,
@@ -128,9 +166,40 @@ impl Dht {
         )
     }
 
+    fn connectivity_service(&self, shutdown_signal: ShutdownSignal) -> DhtConnectivity {
+        DhtConnectivity::new(
+            self.config.clone(),
+            self.peer_manager.clone(),
+            self.node_identity.clone(),
+            self.connectivity.clone(),
+            self.dht_requester(),
+            shutdown_signal,
+        )
+    }
+
+    fn store_and_forward_service(
+        &self,
+        conn: DbConnection,
+        request_rx: mpsc::Receiver<StoreAndForwardRequest>,
+        shutdown_signal: ShutdownSignal,
+    ) -> StoreAndForwardService
+    {
+        StoreAndForwardService::new(
+            self.config.clone(),
+            conn,
+            self.node_identity.clone(),
+            self.peer_manager.clone(),
+            self.dht_requester(),
+            self.connectivity.clone(),
+            self.outbound_requester(),
+            request_rx,
+            shutdown_signal,
+        )
+    }
+
     /// Return a new OutboundMessageRequester connected to the receiver
     pub fn outbound_requester(&self) -> OutboundMessageRequester {
-        OutboundMessageRequester::new(self.outbound_sender.clone())
+        OutboundMessageRequester::new(self.outbound_tx.clone())
     }
 
     /// Returns a requester for the DhtActor associated with this instance
@@ -143,10 +212,9 @@ impl Dht {
         DhtDiscoveryRequester::new(self.discovery_sender.clone(), self.config.discovery_request_timeout)
     }
 
-    /// Takes ownership of the receiver for DhtOutboundRequest. Will return None if ownership
-    /// has already been taken.
-    pub fn take_outbound_receiver(&mut self) -> Option<mpsc::Receiver<DhtOutboundRequest>> {
-        self.outbound_receiver.take()
+    /// Returns a requester for the StoreAndForwardService associated with this instance
+    pub fn store_and_forward_requester(&self) -> StoreAndForwardRequester {
+        StoreAndForwardRequester::new(self.saf_sender.clone())
     }
 
     /// Returns an the full DHT stack as a `tower::layer::Layer`. This can be composed with
@@ -158,37 +226,41 @@ impl Dht {
         Service = impl Service<
             InboundMessage,
             Response = (),
-            Error = MiddlewareError,
-            Future = impl Future<Output = Result<(), MiddlewareError>> + Send,
+            Error = PipelineError,
+            Future = impl Future<Output = Result<(), PipelineError>> + Send,
         > + Clone
                       + Send,
     >
     where
-        S: Service<DecryptedDhtMessage, Response = (), Error = MiddlewareError> + Clone + Send + Sync + 'static,
+        S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError> + Clone + Send + Sync + 'static,
         S::Future: Send,
     {
-        let saf_storage = Arc::new(store_forward::SafStorage::new(
-            self.config.saf_msg_cache_storage_capacity,
-        ));
-
+        // FIXME: There is an unresolved stack overflow issue on windows in debug mode during runtime, but not in
+        //        release mode, related to the amount of layers. (issue #1416)
         ServiceBuilder::new()
-            .layer(inbound::DeserializeLayer::new())
-            .layer(inbound::DedupLayer::new(self.dht_requester()))
+            .layer(inbound::DeserializeLayer)
+            .layer(inbound::ValidateLayer::new(self.config.network))
+            .layer(DedupLayer::new(self.dht_requester()))
             .layer(tower_filter::FilterLayer::new(self.unsupported_saf_messages_filter()))
+            .layer(MessageLoggingLayer::new(format!(
+                "Inbound [{}]",
+                self.node_identity.node_id().short_str()
+            )))
             .layer(inbound::DecryptionLayer::new(Arc::clone(&self.node_identity)))
             .layer(store_forward::ForwardLayer::new(
-                Arc::clone(&self.peer_manager),
+                self.config.clone(),
                 self.outbound_requester(),
+                self.node_identity.features().contains(PeerFeatures::DHT_STORE_FORWARD),
             ))
             .layer(store_forward::StoreLayer::new(
                 self.config.clone(),
                 Arc::clone(&self.peer_manager),
                 Arc::clone(&self.node_identity),
-                Arc::clone(&saf_storage),
+                self.store_and_forward_requester(),
             ))
             .layer(store_forward::MessageHandlerLayer::new(
                 self.config.clone(),
-                saf_storage,
+                self.store_and_forward_requester(),
                 self.dht_requester(),
                 Arc::clone(&self.node_identity),
                 Arc::clone(&self.peer_manager),
@@ -213,13 +285,13 @@ impl Dht {
         Service = impl Service<
             DhtOutboundRequest,
             Response = (),
-            Error = MiddlewareError,
-            Future = impl Future<Output = Result<(), MiddlewareError>> + Send,
+            Error = PipelineError,
+            Future = impl Future<Output = Result<(), PipelineError>> + Send,
         > + Clone
                       + Send,
     >
     where
-        S: Service<OutboundMessage, Response = (), Error = MiddlewareError> + Clone + Send + 'static,
+        S: Service<OutboundMessage, Response = (), Error = PipelineError> + Clone + Send + 'static,
         S::Future: Send,
     {
         ServiceBuilder::new()
@@ -227,9 +299,13 @@ impl Dht {
                 Arc::clone(&self.node_identity),
                 self.dht_requester(),
                 self.discovery_service_requester(),
+                self.config.network,
             ))
-            .layer(outbound::EncryptionLayer::new(Arc::clone(&self.node_identity)))
-            .layer(outbound::SerializeLayer::new(Arc::clone(&self.node_identity)))
+            .layer(MessageLoggingLayer::new(format!(
+                "Outbound [{}]",
+                self.node_identity.node_id().short_str()
+            )))
+            .layer(outbound::SerializeLayer)
             .into_inner()
     }
 
@@ -237,7 +313,7 @@ impl Dht {
     /// supported by the node.
     fn unsupported_saf_messages_filter(
         &self,
-    ) -> impl tower_filter::Predicate<DhtInboundMessage, Future = future::Ready<Result<(), FilterError>>> + Clone + Send
+    ) -> impl tower_filter::Predicate<DhtInboundMessage, Future = future::Ready<Result<(), PipelineError>>> + Clone + Send
     {
         let node_identity = Arc::clone(&self.node_identity);
         move |msg: &DhtInboundMessage| {
@@ -246,14 +322,16 @@ impl Dht {
             }
 
             match msg.dht_header.message_type {
-                DhtMessageType::SafRequestMessages | DhtMessageType::SafStoredMessages => {
-                    // TODO: This is an indication of node misbehaviour
-                    warn!(
+                DhtMessageType::SafRequestMessages => {
+                    // TODO: #banheuristic This is an indication of node misbehaviour
+                    debug!(
                         "Received store and forward message from PublicKey={}. Store and forward feature is not \
                          supported by this node. Discarding message.",
-                        msg.dht_header.origin_public_key
+                        msg.source_peer.public_key
                     );
-                    future::ready(Err(FilterError::rejected()))
+                    future::ready(Err(PipelineError::from_debug(
+                        "Message filtered out because store and forward is not supported by this node",
+                    )))
                 },
                 _ => future::ready(Ok(())),
             }
@@ -264,8 +342,9 @@ impl Dht {
 #[cfg(test)]
 mod test {
     use crate::{
+        crypt,
         envelope::DhtMessageFlags,
-        outbound::DhtOutboundRequest,
+        outbound::mock::create_outbound_service_mock,
         proto::envelope::DhtMessageType,
         test_utils::{
             make_client_identity,
@@ -279,190 +358,208 @@ mod test {
     use futures::{channel::mpsc, StreamExt};
     use std::{sync::Arc, time::Duration};
     use tari_comms::{
-        message::{MessageExt, MessageFlags},
-        utils::crypt::{encrypt, generate_ecdh_secret},
+        message::{MessageExt, MessageTag},
+        pipeline::SinkService,
+        test_utils::mocks::create_connectivity_mock,
         wrap_in_envelope_body,
     };
-    use tari_comms_middleware::sink::SinkMiddleware;
     use tari_shutdown::Shutdown;
-    use tokio::{future::FutureExt, runtime::Runtime};
+    use tokio::{task, time};
     use tower::{layer::Layer, Service};
 
-    #[test]
-    fn stack_unencrypted() {
+    #[tokio_macros::test_basic]
+    async fn stack_unencrypted() {
         let node_identity = make_node_identity();
         let peer_manager = make_peer_manager();
-        let rt = Runtime::new().unwrap();
+        let (connectivity, _) = create_connectivity_mock();
+
+        // Dummy out channel, we are not testing outbound here.
+        let (out_tx, _) = mpsc::channel(10);
 
         let shutdown = Shutdown::new();
         let dht = DhtBuilder::new(
             Arc::clone(&node_identity),
             peer_manager,
-            rt.executor(),
+            out_tx,
+            connectivity,
             shutdown.to_signal(),
         )
-        .finish();
+        .local_test()
+        .finish()
+        .await
+        .unwrap();
 
         let (out_tx, mut out_rx) = mpsc::channel(10);
 
-        let mut service = dht.inbound_middleware_layer().layer(SinkMiddleware::new(out_tx));
+        let mut service = dht.inbound_middleware_layer().layer(SinkService::new(out_tx));
 
-        let msg = wrap_in_envelope_body!(b"secret".to_vec()).unwrap();
+        let msg = wrap_in_envelope_body!(b"secret".to_vec());
         let dht_envelope = make_dht_envelope(
             &node_identity,
-            msg.to_encoded_bytes().unwrap(),
+            msg.to_encoded_bytes(),
             DhtMessageFlags::empty(),
+            false,
+            MessageTag::new(),
         );
-        let inbound_message = make_comms_inbound_message(
-            &node_identity,
-            dht_envelope.to_encoded_bytes().unwrap(),
-            MessageFlags::empty(),
-        );
+        let inbound_message = make_comms_inbound_message(&node_identity, dht_envelope.to_encoded_bytes().into());
 
-        let msg = rt.block_on(async move {
+        let msg = {
             service.call(inbound_message).await.unwrap();
-            let msg = out_rx.next().timeout(Duration::from_secs(10)).await.unwrap().unwrap();
+            let msg = time::timeout(Duration::from_secs(10), out_rx.next())
+                .await
+                .unwrap()
+                .unwrap();
             msg.success().unwrap().decode_part::<Vec<u8>>(0).unwrap().unwrap()
-        });
+        };
 
         assert_eq!(msg, b"secret");
     }
 
-    #[test]
-    fn stack_encrypted() {
+    #[tokio_macros::test_basic]
+    async fn stack_encrypted() {
         let node_identity = make_node_identity();
         let peer_manager = make_peer_manager();
+        let (connectivity, _) = create_connectivity_mock();
 
-        let rt = Runtime::new().unwrap();
+        // Dummy out channel, we are not testing outbound here.
+        let (out_tx, _out_rx) = mpsc::channel(10);
+
         let shutdown = Shutdown::new();
         let dht = DhtBuilder::new(
             Arc::clone(&node_identity),
             peer_manager,
-            rt.executor(),
+            out_tx,
+            connectivity,
             shutdown.to_signal(),
         )
-        .finish();
+        .finish()
+        .await
+        .unwrap();
 
         let (out_tx, mut out_rx) = mpsc::channel(10);
 
-        let mut service = dht.inbound_middleware_layer().layer(SinkMiddleware::new(out_tx));
+        let mut service = dht.inbound_middleware_layer().layer(SinkService::new(out_tx));
 
-        let msg = wrap_in_envelope_body!(b"secret".to_vec()).unwrap();
+        let msg = wrap_in_envelope_body!(b"secret".to_vec());
         // Encrypt for self
-        let ecdh_key = generate_ecdh_secret(node_identity.secret_key(), node_identity.public_key());
-        let encrypted_bytes = encrypt(&ecdh_key, &msg.to_encoded_bytes().unwrap()).unwrap();
-        let dht_envelope = make_dht_envelope(&node_identity, encrypted_bytes, DhtMessageFlags::ENCRYPTED);
-        let inbound_message = make_comms_inbound_message(
+        let dht_envelope = make_dht_envelope(
             &node_identity,
-            dht_envelope.to_encoded_bytes().unwrap(),
-            MessageFlags::empty(),
+            msg.to_encoded_bytes(),
+            DhtMessageFlags::ENCRYPTED,
+            true,
+            MessageTag::new(),
         );
+        let inbound_message = make_comms_inbound_message(&node_identity, dht_envelope.to_encoded_bytes().into());
 
-        let msg = rt.block_on(async move {
+        let msg = {
             service.call(inbound_message).await.unwrap();
-            let msg = out_rx.next().timeout(Duration::from_secs(10)).await.unwrap().unwrap();
+            let msg = time::timeout(Duration::from_secs(10), out_rx.next())
+                .await
+                .unwrap()
+                .unwrap();
             msg.success().unwrap().decode_part::<Vec<u8>>(0).unwrap().unwrap()
-        });
+        };
 
         assert_eq!(msg, b"secret");
     }
 
-    #[test]
-    fn stack_forward() {
+    #[tokio_macros::test_basic]
+    async fn stack_forward() {
         let node_identity = make_node_identity();
         let peer_manager = make_peer_manager();
 
-        let rt = Runtime::new().unwrap();
         let shutdown = Shutdown::new();
-        let mut dht = DhtBuilder::new(
+
+        let (connectivity, _) = create_connectivity_mock();
+        let (next_service_tx, mut next_service_rx) = mpsc::channel(10);
+        let (oms_requester, oms_mock) = create_outbound_service_mock(1);
+
+        // Send all outbound requests to the mock
+        let dht = DhtBuilder::new(
             Arc::clone(&node_identity),
             peer_manager,
-            rt.executor(),
+            oms_requester.get_mpsc_sender(),
+            connectivity,
             shutdown.to_signal(),
         )
-        .finish();
+        .finish()
+        .await
+        .unwrap();
+        let oms_mock_state = oms_mock.get_state();
+        task::spawn(oms_mock.run());
 
-        let rt = Runtime::new().unwrap();
+        let mut service = dht.inbound_middleware_layer().layer(SinkService::new(next_service_tx));
 
-        let (next_service_tx, mut next_service_rx) = mpsc::channel(10);
-
-        let mut service = dht
-            .inbound_middleware_layer()
-            .layer(SinkMiddleware::new(next_service_tx));
-
-        let msg = wrap_in_envelope_body!(b"unencrypteable".to_vec()).unwrap();
+        let msg = wrap_in_envelope_body!(b"unencrypteable".to_vec());
 
         // Encrypt for someone else
         let node_identity2 = make_node_identity();
-        let ecdh_key = generate_ecdh_secret(node_identity2.secret_key(), node_identity2.public_key());
-        let encrypted_bytes = encrypt(&ecdh_key, &msg.to_encoded_bytes().unwrap()).unwrap();
-        let dht_envelope = make_dht_envelope(&node_identity, encrypted_bytes, DhtMessageFlags::ENCRYPTED);
-        let inbound_message = make_comms_inbound_message(
+        let ecdh_key = crypt::generate_ecdh_secret(node_identity2.secret_key(), node_identity2.public_key());
+        let encrypted_bytes = crypt::encrypt(&ecdh_key, &msg.to_encoded_bytes()).unwrap();
+        let dht_envelope = make_dht_envelope(
             &node_identity,
-            dht_envelope.to_encoded_bytes().unwrap(),
-            MessageFlags::empty(),
+            encrypted_bytes,
+            DhtMessageFlags::ENCRYPTED,
+            true,
+            MessageTag::new(),
         );
 
-        let mut oms_receiver = dht.take_outbound_receiver().unwrap();
+        let origin_mac = dht_envelope.header.as_ref().unwrap().origin_mac.clone();
+        assert_eq!(origin_mac.is_empty(), false);
+        let inbound_message = make_comms_inbound_message(&node_identity, dht_envelope.to_encoded_bytes().into());
 
-        let msg = rt.block_on(async move {
-            service.call(inbound_message).await.unwrap();
-            oms_receiver
-                .next()
-                .timeout(Duration::from_secs(10))
-                .await
-                .unwrap()
-                .unwrap()
-        });
+        service.call(inbound_message).await.unwrap();
 
-        // Check that OMS got a request to forward
-        match msg {
-            DhtOutboundRequest::Forward { .. } => {},
-            _ => panic!("unexpected message"),
-        }
+        assert_eq!(oms_mock_state.call_count(), 1);
+        let (params, _) = oms_mock_state.pop_call().unwrap();
+
+        // Check that OMS got a request to forward with the original Dht Header
+        assert_eq!(params.dht_header.unwrap().origin_mac, origin_mac);
+
         // Check the next service was not called
-        assert!(rt.block_on(next_service_rx.next()).is_none());
+        assert!(next_service_rx.try_next().is_err());
     }
 
-    #[test]
-    fn stack_filter_saf_message() {
+    #[tokio_macros::test_basic]
+    async fn stack_filter_saf_message() {
         let node_identity = make_client_identity();
         let peer_manager = make_peer_manager();
+        let (connectivity, _) = create_connectivity_mock();
 
-        let rt = Runtime::new().unwrap();
+        // Dummy out channel, we are not testing outbound here.
+        let (out_tx, _) = mpsc::channel(10);
+
         let shutdown = Shutdown::new();
         let dht = DhtBuilder::new(
             Arc::clone(&node_identity),
             peer_manager,
-            rt.executor(),
+            out_tx,
+            connectivity,
             shutdown.to_signal(),
         )
-        .finish();
+        .finish()
+        .await
+        .unwrap();
 
         let (next_service_tx, mut next_service_rx) = mpsc::channel(10);
 
-        let mut service = dht
-            .inbound_middleware_layer()
-            .layer(SinkMiddleware::new(next_service_tx));
+        let mut service = dht.inbound_middleware_layer().layer(SinkService::new(next_service_tx));
 
-        let msg = wrap_in_envelope_body!(b"secret".to_vec()).unwrap();
+        let msg = wrap_in_envelope_body!(b"secret".to_vec());
         let mut dht_envelope = make_dht_envelope(
             &node_identity,
-            msg.to_encoded_bytes().unwrap(),
+            msg.to_encoded_bytes(),
             DhtMessageFlags::empty(),
+            false,
+            MessageTag::new(),
         );
         dht_envelope.header.as_mut().and_then(|header| {
             header.message_type = DhtMessageType::SafStoredMessages as i32;
             Some(header)
         });
-        let inbound_message = make_comms_inbound_message(
-            &node_identity,
-            dht_envelope.to_encoded_bytes().unwrap(),
-            MessageFlags::empty(),
-        );
+        let inbound_message = make_comms_inbound_message(&node_identity, dht_envelope.to_encoded_bytes().into());
 
-        let err = rt.block_on(service.call(inbound_message));
-        assert!(err.is_err());
+        service.call(inbound_message).await.unwrap_err();
         // This seems like the best way to tell that an open channel is empty without the test blocking indefinitely
         assert_eq!(
             format!("{}", next_service_rx.try_next().unwrap_err()),

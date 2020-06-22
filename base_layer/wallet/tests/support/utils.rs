@@ -20,24 +20,16 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use futures::{select, stream::FusedStream, FutureExt, Stream, StreamExt};
-use rand::{distributions::Alphanumeric, CryptoRng, OsRng, Rng};
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    hash::Hash,
-    iter,
-    thread,
-    time::{Duration, Instant},
+use rand::{distributions::Alphanumeric, rngs::OsRng, CryptoRng, Rng};
+use std::{fmt::Debug, iter, thread, time::Duration};
+use tari_core::transactions::{
+    tari_amount::MicroTari,
+    transaction::{OutputFeatures, TransactionInput, UnblindedOutput},
+    types::{CommitmentFactory, PrivateKey, PublicKey},
 };
 use tari_crypto::{
     commitment::HomomorphicCommitmentFactory,
     keys::{PublicKey as PublicKeyTrait, SecretKey as SecretKeyTrait},
-};
-use tari_transactions::{
-    tari_amount::MicroTari,
-    transaction::{OutputFeatures, TransactionInput, UnblindedOutput},
-    types::{PrivateKey, PublicKey, COMMITMENT_FACTORY},
 };
 
 pub fn assert_change<F, T>(mut func: F, to: T, poll_count: usize)
@@ -66,38 +58,6 @@ where
     }
 }
 
-/// This method will read the specified number of items from a stream and assemble a HashMap with the received item as a
-/// key and the number of occurrences as a value. If the stream does not yield the desired number of items the function
-/// will return what it is has received
-pub async fn event_stream_count<TStream>(
-    mut stream: TStream,
-    num_items: usize,
-    timeout: Duration,
-) -> HashMap<TStream::Item, u32>
-where
-    TStream: Stream + FusedStream + Unpin,
-    TStream::Item: Hash + Eq + Clone,
-{
-    let mut result = HashMap::new();
-    let mut count = 0;
-    loop {
-        select! {
-                    item = stream.select_next_some() => {
-                        let e = result.entry(item.clone()).or_insert(0);
-                        *e += 1;
-                        count += 1;
-                        if count >= num_items {
-                            break;
-                        }
-                     },
-                    _ = tokio::timer::delay(Instant::now() + timeout).fuse() => { break; },
-        //            complete => { break; },
-                }
-    }
-
-    result
-}
-
 pub struct TestParams {
     pub spend_key: PrivateKey,
     pub change_key: PrivateKey,
@@ -117,14 +77,18 @@ impl TestParams {
         }
     }
 }
-pub fn make_input<R: Rng + CryptoRng>(rng: &mut R, val: MicroTari) -> (TransactionInput, UnblindedOutput) {
+pub fn make_input<R: Rng + CryptoRng>(
+    rng: &mut R,
+    val: MicroTari,
+    factory: &CommitmentFactory,
+) -> (TransactionInput, UnblindedOutput)
+{
     let key = PrivateKey::random(rng);
-    let commitment = COMMITMENT_FACTORY.commit_value(&key, val.into());
+    let commitment = factory.commit_value(&key, val.into());
     let input = TransactionInput::new(OutputFeatures::default(), commitment);
     (input, UnblindedOutput::new(val, key, None))
 }
 
 pub fn random_string(len: usize) -> String {
-    let mut rng = OsRng::new().unwrap();
-    iter::repeat(()).map(|_| rng.sample(Alphanumeric)).take(len).collect()
+    iter::repeat(()).map(|_| OsRng.sample(Alphanumeric)).take(len).collect()
 }

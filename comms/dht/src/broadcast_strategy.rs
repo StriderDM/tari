@@ -20,6 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use crate::envelope::NodeDestination;
 use std::{fmt, fmt::Formatter};
 use tari_comms::{peer_manager::node_id::NodeId, types::CommsPublicKey};
 
@@ -27,24 +28,25 @@ use tari_comms::{peer_manager::node_id::NodeId, types::CommsPublicKey};
 pub struct BroadcastClosestRequest {
     pub n: usize,
     pub node_id: NodeId,
-    pub excluded_peers: Vec<CommsPublicKey>,
+    pub excluded_peers: Vec<NodeId>,
+    pub connected_only: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum BroadcastStrategy {
     /// Send to a particular peer matching the given node ID
-    DirectNodeId(NodeId),
+    DirectNodeId(Box<NodeId>),
     /// Send to a particular peer matching the given Public Key
-    DirectPublicKey(CommsPublicKey),
-    /// Send to all known Communication Node peers
+    DirectPublicKey(Box<CommsPublicKey>),
+    /// Send to all known peers
     Flood,
-    /// Send to a random set of peers of size n that are Communication Nodes
-    Random(usize),
+    /// Send to a random set of peers of size n that are Communication Nodes, excluding the given node IDs
+    Random(usize, Vec<NodeId>),
     /// Send to all n nearest Communication Nodes according to the given BroadcastClosestRequest
     Closest(Box<BroadcastClosestRequest>),
-    /// A convenient strategy which behaves the same as the `Closest` strategy with the `NodeId` set
-    /// to this node and a pre-configured number of neighbours. This strategy excludes the given public keys.
-    Neighbours(Vec<CommsPublicKey>),
+    Broadcast(Vec<NodeId>),
+    /// Propagate to a set of closest neighbours and random peers
+    Propagate(NodeDestination, Vec<NodeId>),
 }
 
 impl fmt::Display for BroadcastStrategy {
@@ -55,13 +57,22 @@ impl fmt::Display for BroadcastStrategy {
             DirectNodeId(node_id) => write!(f, "DirectNodeId({})", node_id),
             Flood => write!(f, "Flood"),
             Closest(request) => write!(f, "Closest({})", request.n),
-            Random(n) => write!(f, "Random({})", n),
-            Neighbours(excluded) => write!(f, "Neighbours({} excluded)", excluded.len()),
+            Random(n, excluded) => write!(f, "Random({}, {} excluded)", n, excluded.len()),
+            Broadcast(excluded) => write!(f, "Broadcast({} excluded)", excluded.len()),
+            Propagate(destination, excluded) => write!(f, "Propagate({}, {} excluded)", destination, excluded.len(),),
         }
     }
 }
 
 impl BroadcastStrategy {
+    pub fn is_broadcast(&self) -> bool {
+        use BroadcastStrategy::*;
+        match self {
+            Closest(_) | Flood | Broadcast(_) | Random(_, _) | Propagate(_, _) => true,
+            _ => false,
+        }
+    }
+
     pub fn is_direct(&self) -> bool {
         use BroadcastStrategy::*;
         match self {
@@ -86,7 +97,7 @@ impl BroadcastStrategy {
         }
     }
 
-    pub fn take_direct_public_key(self) -> Option<CommsPublicKey> {
+    pub fn into_direct_public_key(self) -> Option<Box<CommsPublicKey>> {
         use BroadcastStrategy::*;
         match self {
             DirectPublicKey(pk) => Some(pk),
@@ -101,63 +112,73 @@ mod test {
 
     #[test]
     fn is_direct() {
-        assert!(BroadcastStrategy::DirectPublicKey(CommsPublicKey::default()).is_direct());
-        assert!(BroadcastStrategy::DirectNodeId(NodeId::default()).is_direct());
-        assert_eq!(BroadcastStrategy::Neighbours(Default::default()).is_direct(), false);
+        assert!(BroadcastStrategy::DirectPublicKey(Box::new(CommsPublicKey::default())).is_direct());
+        assert!(BroadcastStrategy::DirectNodeId(Box::new(NodeId::default())).is_direct());
+        assert_eq!(BroadcastStrategy::Broadcast(Default::default()).is_direct(), false);
+        assert_eq!(
+            BroadcastStrategy::Propagate(Default::default(), Default::default()).is_direct(),
+            false
+        );
         assert_eq!(BroadcastStrategy::Flood.is_direct(), false);
         assert_eq!(
             BroadcastStrategy::Closest(Box::new(BroadcastClosestRequest {
                 node_id: NodeId::default(),
                 n: 0,
-                excluded_peers: Default::default()
+                excluded_peers: Default::default(),
+                connected_only: false
             }))
             .is_direct(),
             false
         );
-        assert_eq!(BroadcastStrategy::Random(0).is_direct(), false);
+        assert_eq!(BroadcastStrategy::Random(0, vec![]).is_direct(), false);
     }
 
     #[test]
     fn direct_public_key() {
-        assert!(BroadcastStrategy::DirectPublicKey(CommsPublicKey::default())
+        assert!(BroadcastStrategy::DirectPublicKey(Box::new(CommsPublicKey::default()))
             .direct_public_key()
             .is_some());
-        assert!(BroadcastStrategy::DirectNodeId(NodeId::default())
+        assert!(BroadcastStrategy::DirectNodeId(Box::new(NodeId::default()))
             .direct_public_key()
             .is_none());
-        assert!(BroadcastStrategy::Neighbours(Default::default())
+        assert!(BroadcastStrategy::Broadcast(Default::default(),)
             .direct_public_key()
             .is_none());
         assert!(BroadcastStrategy::Flood.direct_public_key().is_none());
         assert!(BroadcastStrategy::Closest(Box::new(BroadcastClosestRequest {
             node_id: NodeId::default(),
             n: 0,
-            excluded_peers: Default::default()
+            excluded_peers: Default::default(),
+            connected_only: false
         }))
         .direct_public_key()
         .is_none(),);
-        assert!(BroadcastStrategy::Random(0).direct_public_key().is_none(), false);
+        assert!(
+            BroadcastStrategy::Random(0, vec![]).direct_public_key().is_none(),
+            false
+        );
     }
 
     #[test]
     fn direct_node_id() {
-        assert!(BroadcastStrategy::DirectPublicKey(CommsPublicKey::default())
+        assert!(BroadcastStrategy::DirectPublicKey(Box::new(CommsPublicKey::default()))
             .direct_node_id()
             .is_none());
-        assert!(BroadcastStrategy::DirectNodeId(NodeId::default())
+        assert!(BroadcastStrategy::DirectNodeId(Box::new(NodeId::default()))
             .direct_node_id()
             .is_some());
-        assert!(BroadcastStrategy::Neighbours(Default::default())
+        assert!(BroadcastStrategy::Broadcast(Default::default(),)
             .direct_node_id()
             .is_none());
         assert!(BroadcastStrategy::Flood.direct_node_id().is_none());
         assert!(BroadcastStrategy::Closest(Box::new(BroadcastClosestRequest {
             node_id: NodeId::default(),
             n: 0,
-            excluded_peers: Default::default()
+            excluded_peers: Default::default(),
+            connected_only: false
         }))
         .direct_node_id()
         .is_none(),);
-        assert!(BroadcastStrategy::Random(0).direct_node_id().is_none(), false);
+        assert!(BroadcastStrategy::Random(0, vec![]).direct_node_id().is_none(), false);
     }
 }

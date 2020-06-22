@@ -23,7 +23,7 @@
 use crate::{blocks::blockheader::BlockHash, proof_of_work::Difficulty};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Error, Formatter};
-use tari_utilities::hex::Hex;
+use tari_crypto::tari_utilities::hex::Hex;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChainMetadata {
@@ -31,20 +31,26 @@ pub struct ChainMetadata {
     pub height_of_longest_chain: Option<u64>,
     /// The block hash of the current tip of the longest valid chain, or `None` for an empty chain
     pub best_block: Option<BlockHash>,
-    /// The total accumulated difficulty, or work, on the longest valid chain since the genesis block.
-    pub total_accumulated_difficulty: Difficulty,
     /// The number of blocks back from the tip that this database tracks. A value of 0 indicates that all blocks are
     /// tracked (i.e. the database is in full archival mode).
     pub pruning_horizon: u64,
+    /// The geometric mean of the proof of work of the longest chain, none if the chain is empty
+    pub accumulated_difficulty: Option<Difficulty>,
 }
 
 impl ChainMetadata {
-    pub fn new(height: u64, hash: BlockHash, work: Difficulty, horizon: u64) -> ChainMetadata {
+    pub fn new(
+        height: u64,
+        hash: BlockHash,
+        pruning_horizon: u64,
+        accumulated_difficulty: Difficulty,
+    ) -> ChainMetadata
+    {
         ChainMetadata {
             height_of_longest_chain: Some(height),
             best_block: Some(hash),
-            total_accumulated_difficulty: work,
-            pruning_horizon: horizon,
+            pruning_horizon,
+            accumulated_difficulty: Some(accumulated_difficulty),
         }
     }
 
@@ -66,6 +72,21 @@ impl ChainMetadata {
     pub fn archival_mode(&mut self) {
         self.pruning_horizon = 0;
     }
+
+    /// Set the pruning horizon to indicate that the chain is in pruned mode (i.e. a pruning horizon of 2880)
+    pub fn pruned_mode(&mut self) {
+        self.pruning_horizon = 2880;
+    }
+
+    /// Check if the node is an archival node based on its pruning horizon.
+    pub fn is_archival_node(&self) -> bool {
+        self.pruning_horizon == 0
+    }
+
+    /// Check if the node is a pruned node based on its pruning horizon.
+    pub fn is_pruned_node(&self) -> bool {
+        self.pruning_horizon != 0
+    }
 }
 
 impl Default for ChainMetadata {
@@ -73,8 +94,8 @@ impl Default for ChainMetadata {
         ChainMetadata {
             height_of_longest_chain: None,
             best_block: None,
-            total_accumulated_difficulty: Difficulty::default(),
-            pruning_horizon: 2880,
+            pruning_horizon: 0,
+            accumulated_difficulty: None,
         }
     }
 }
@@ -86,13 +107,14 @@ impl Display for ChainMetadata {
             .best_block
             .clone()
             .map(|b| b.to_hex())
-            .unwrap_or("Empty Database".into());
+            .unwrap_or_else(|| "Empty Database".into());
+        let accumulated_difficulty = self.accumulated_difficulty.unwrap_or_else(|| 0.into());
         fmt.write_str(&format!("Height of longest chain : {}\n", height))?;
-        fmt.write_str(&format!("Best_block : {}\n", best_block))?;
         fmt.write_str(&format!(
-            "Total accumulated difficulty : {}\n",
-            self.total_accumulated_difficulty
+            "Geometric mean of longest chain : {}\n",
+            accumulated_difficulty
         ))?;
+        fmt.write_str(&format!("Best_block : {}\n", best_block))?;
         fmt.write_str(&format!("Pruning horizon : {}\n", self.pruning_horizon))
     }
 }
@@ -108,8 +130,9 @@ mod test {
     }
 
     #[test]
-    fn horizon_block() {
-        let metadata = ChainMetadata::default();
+    fn pruned_mode() {
+        let mut metadata = ChainMetadata::default();
+        metadata.pruned_mode();
         assert_eq!(metadata.horizon_block(0), 0);
         assert_eq!(metadata.horizon_block(100), 0);
         assert_eq!(metadata.horizon_block(2880), 0);

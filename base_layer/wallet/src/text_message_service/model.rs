@@ -41,10 +41,11 @@ use digest::Digest;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, convert::TryFrom};
 use tari_comms::connection::NetAddress;
-use tari_utilities::{
+use tari_crypto::tari_utilities::{
     byte_array::ByteArray,
     hex::{from_hex, Hex},
 };
+use rand::rngs::OsRng;
 
 /// This function generates a unique ID hash for a Text Message from the message components and an index integer
 ///
@@ -648,11 +649,10 @@ mod test {
 
     #[test]
     fn db_model_tests() {
-        let mut rng = rand::OsRng::new().unwrap();
-        let (_secret_key1, public_key1) = CommsPublicKey::random_keypair(&mut rng);
-        let (_secret_key2, public_key2) = CommsPublicKey::random_keypair(&mut rng);
-        let (_secret_key3, public_key3) = CommsPublicKey::random_keypair(&mut rng);
-        let (_secret_key4, public_key4) = CommsPublicKey::random_keypair(&mut rng);
+        let (_secret_key1, public_key1) = CommsPublicKey::random_keypair(&mut OsRng);
+        let (_secret_key2, public_key2) = CommsPublicKey::random_keypair(&mut OsRng);
+        let (_secret_key3, public_key3) = CommsPublicKey::random_keypair(&mut OsRng);
+        let (_secret_key4, public_key4) = CommsPublicKey::random_keypair(&mut OsRng);
 
         let db_name = "test.sqlite3";
         let db_path = get_path(Some(db_name));

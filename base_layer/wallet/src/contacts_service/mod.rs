@@ -34,14 +34,14 @@ use tari_service_framework::{
     ServiceInitializer,
 };
 use tari_shutdown::ShutdownSignal;
-use tokio::runtime::TaskExecutor;
+use tokio::runtime;
 
 pub mod error;
 pub mod handle;
 pub mod service;
 pub mod storage;
 
-const LOG_TARGET: &'static str = "base_layer::wallet::contacts_service::initializer";
+const LOG_TARGET: &str = "wallet::contacts_service::initializer";
 
 pub struct ContactsServiceInitializer<T>
 where T: ContactsBackend
@@ -64,7 +64,7 @@ where T: ContactsBackend + 'static
 
     fn initialize(
         &mut self,
-        executor: TaskExecutor,
+        executor: runtime::Handle,
         handles_fut: ServiceHandlesFuture,
         shutdown: ShutdownSignal,
     ) -> Self::Future

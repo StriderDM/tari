@@ -20,29 +20,35 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::outbound::DhtOutboundError;
-use derive_error::Error;
+use crate::outbound::{message::SendFailure, DhtOutboundError};
 use futures::channel::mpsc::SendError;
-use tari_comms::peer_manager::PeerManagerError;
+use tari_comms::{connection_manager::ConnectionManagerError, peer_manager::PeerManagerError};
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum DhtDiscoveryError {
-    /// The reply channel was canceled
+    #[error("The reply channel was canceled")]
     ReplyCanceled,
-    DhtOutboundError(DhtOutboundError),
-    /// Received a discovery response which did not match an inflight discovery request
-    InflightDiscoveryRequestNotFound,
-    /// Received public key in peer discovery response which does not match the requested public key
+    #[error("DhtOutboundError: {0}")]
+    DhtOutboundError(#[from] DhtOutboundError),
+    #[error("Received public key in peer discovery response which does not match the requested public key")]
     DiscoveredPeerMismatch,
-    /// Received an invalid `NodeId`
+    #[error("Received an invalid `NodeId`")]
     InvalidNodeId,
-    /// MPSC channel is disconnected
+    #[error("MPSC channel is disconnected")]
     ChannelDisconnected,
-    /// MPSC sender was unable to send because the channel buffer is full
+    #[error("MPSC sender was unable to send because the channel buffer is full")]
     SendBufferFull,
-    /// The discovery request timed out
+    #[error("The discovery request timed out")]
     DiscoveryTimeout,
-    PeerManagerError(PeerManagerError),
+    #[error("Failed to send discovery message: {0}")]
+    DiscoverySendFailed(SendFailure),
+    #[error("PeerManagerError: {0}")]
+    PeerManagerError(#[from] PeerManagerError),
+    #[error("InvalidPeerMultiaddr: {0}")]
+    InvalidPeerMultiaddr(String),
+    #[error("ConnectionManagerError: {0}")]
+    ConnectionManagerError(#[from] ConnectionManagerError),
 }
 
 impl DhtDiscoveryError {

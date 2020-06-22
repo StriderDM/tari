@@ -22,15 +22,18 @@
 
 use std::convert::{From, TryFrom};
 use tari_comms::{peer_manager::Peer, types::CommsPublicKey};
+use tari_comms_dht::envelope::DhtMessageHeader;
 
 /// Wrapper around a received message. Provides source peer and origin information
 #[derive(Debug, Clone)]
 pub struct DomainMessage<T> {
     /// The peer which sent this message
     pub source_peer: Peer,
-    /// The origin of this message. This will be different from `source_peer.public_key` if
-    /// this message was forwarded from another node on the network.
-    pub origin_pubkey: CommsPublicKey,
+    /// This DHT header of this message. If `DhtMessageHeader::origin_public_key` is different from the
+    /// `source_peer.public_key`, this message was forwarded.
+    pub dht_header: DhtMessageHeader,
+    /// The authenticated origin public key of this message or None a message origin was not provided.
+    pub authenticated_origin: Option<CommsPublicKey>,
     /// The domain-level message
     pub inner: T,
 }
@@ -44,6 +47,21 @@ impl<T> DomainMessage<T> {
         self.inner
     }
 
+    /// Consumes this object returning the public key of the original sender of this message and the message itself
+    pub fn into_origin_and_inner(self) -> (CommsPublicKey, T) {
+        let inner = self.inner;
+        let pk = self.authenticated_origin.unwrap_or(self.source_peer.public_key);
+        (pk, inner)
+    }
+
+    /// Returns the public key that sent this message. If no origin is specified, then the source peer
+    /// sent this message.
+    pub fn origin_public_key(&self) -> &CommsPublicKey {
+        self.authenticated_origin
+            .as_ref()
+            .unwrap_or(&self.source_peer.public_key)
+    }
+
     /// Converts the wrapped value of a DomainMessage to another compatible type.
     ///
     /// Note:
@@ -53,8 +71,9 @@ impl<T> DomainMessage<T> {
     where U: From<T> {
         let inner = U::from(self.inner);
         DomainMessage {
-            origin_pubkey: self.origin_pubkey,
             source_peer: self.source_peer,
+            dht_header: self.dht_header,
+            authenticated_origin: self.authenticated_origin,
             inner,
         }
     }
@@ -68,8 +87,9 @@ impl<T> DomainMessage<T> {
     where U: TryFrom<T> {
         let inner = U::try_from(self.inner)?;
         Ok(DomainMessage {
-            origin_pubkey: self.origin_pubkey,
             source_peer: self.source_peer,
+            dht_header: self.dht_header,
+            authenticated_origin: self.authenticated_origin,
             inner,
         })
     }

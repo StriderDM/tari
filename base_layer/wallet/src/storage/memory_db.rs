@@ -25,15 +25,20 @@ use crate::{
     storage::database::{DbKey, DbKeyValuePair, DbValue, WalletBackend, WriteOperation},
 };
 use std::sync::{Arc, RwLock};
-use tari_comms::peer_manager::Peer;
+use tari_comms::{peer_manager::Peer, types::CommsSecretKey};
 
+#[derive(Default)]
 pub struct InnerDatabase {
     peers: Vec<Peer>,
+    comms_private_key: Option<CommsSecretKey>,
 }
 
 impl InnerDatabase {
     pub fn new() -> Self {
-        Self { peers: Vec::new() }
+        Self {
+            peers: Vec::new(),
+            comms_private_key: None,
+        }
     }
 }
 
@@ -49,6 +54,12 @@ impl WalletMemoryDatabase {
     }
 }
 
+impl Default for WalletMemoryDatabase {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WalletBackend for WalletMemoryDatabase {
     fn fetch(&self, key: &DbKey) -> Result<Option<DbValue>, WalletStorageError> {
         let db = acquire_read_lock!(self.db);
@@ -59,12 +70,13 @@ impl WalletBackend for WalletMemoryDatabase {
                 .find(|v| &v.public_key == pk)
                 .map(|p| DbValue::Peer(Box::new(p.clone()))),
             DbKey::Peers => Some(DbValue::Peers(db.peers.clone())),
+            DbKey::CommsSecretKey => db.comms_private_key.clone().map(DbValue::CommsSecretKey),
         };
 
         Ok(result)
     }
 
-    fn write(&mut self, op: WriteOperation) -> Result<Option<DbValue>, WalletStorageError> {
+    fn write(&self, op: WriteOperation) -> Result<Option<DbValue>, WalletStorageError> {
         let mut db = acquire_write_lock!(self.db);
         match op {
             WriteOperation::Insert(kvp) => match kvp {
@@ -74,6 +86,7 @@ impl WalletBackend for WalletMemoryDatabase {
                     }
                     db.peers.push(p)
                 },
+                DbKeyValuePair::CommsSecretKey(key) => db.comms_private_key = Some(key),
             },
             WriteOperation::Remove(k) => match k {
                 DbKey::Peer(pk) => match db.peers.iter().position(|p| p.public_key == pk) {
@@ -81,6 +94,9 @@ impl WalletBackend for WalletMemoryDatabase {
                     Some(pos) => return Ok(Some(DbValue::Peer(Box::new(db.peers.remove(pos))))),
                 },
                 DbKey::Peers => {
+                    return Err(WalletStorageError::OperationNotSupported);
+                },
+                DbKey::CommsSecretKey => {
                     return Err(WalletStorageError::OperationNotSupported);
                 },
             },

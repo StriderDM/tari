@@ -1,6 +1,6 @@
 [package]
 name = "tari_comms_dht"
-version = "0.0.5"
+version = "0.1.0"
 authors = ["The Tari Development Community"]
 description = "Tari comms DHT module"
 repository = "https://github.com/tari-project/tari"
@@ -9,42 +9,54 @@ readme = "README.md"
 license = "BSD-3-Clause"
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+test-mocks = []
 
 [dependencies]
-tari_comms = { version = "^0.0", path = "../"}
-tari_crypto = { version = "^0.0", path = "../../infrastructure/crypto"}
-tari_utilities = { version = "^0.0", path = "../../infrastructure/tari_util"}
+tari_comms = { version = "^0.1", path = "../"}
+tari_crypto = { version = "^0.3" }
+tari_utilities = { version = "^0.1" }
 tari_shutdown = { version = "^0.0", path = "../../infrastructure/shutdown"}
-tari_comms_middleware = { version = "^0.0", path = "../middleware"}
+tari_storage = { version = "^0.1", path = "../../infrastructure/storage"}
 
 bitflags = "1.2.0"
 bytes = "0.4.12"
 chrono = "0.4.9"
-derive-error = "0.0.4"
+diesel = {version="1.4", features = ["sqlite", "serde_json", "chrono", "numeric"]}
+diesel_migrations =  "1.4"
 digest = "0.8.1"
-futures= {version= "0.3.0-alpha.19", package="futures-preview"}
+futures= {version= "^0.3.1"}
 log = "0.4.8"
-prost = "0.5.0"
-rand = "0.5.5"
+prost = "=0.6.1"
+prost-types = "=0.6.1"
+rand = "0.7.2"
 serde = "1.0.90"
 serde_derive = "1.0.90"
 serde_repr = "0.1.5"
-tokio = "0.2.0-alpha.6"
-tokio-executor = "0.2.0-alpha.6"
-tower-filter= {path="../middleware/tower-filter"}#version="=0.3.0-alpha.2", path="../"
-tower= "0.3.0-alpha.2"
+tokio = {version="0.2.10", features=["rt-threaded", "blocking"]}
+tower= "0.3.1"
 ttl_cache = "0.5.1"
-prost-types = "0.5.0"
+
+# tower-filter dependencies
+pin-project = "0.4"
+thiserror = "1.0.19"
 
 [dev-dependencies]
 tari_test_utils = { version = "^0.0", path = "../../infrastructure/test_utils"}
-tari_storage = { version = "^0.0", path = "../../infrastructure/storage"}
 
+env_logger = "0.7.0"
 futures-test = { version = "0.3.0-alpha.19", package = "futures-test-preview" }
 lmdb-zero = "0.4.4"
+prettytable-rs = "0.8.0"
 tempdir = "0.3.7"
-env_logger = "0.7.0"
+tokio-macros = "0.2.3"
+
+# tower-filter dependencies
+tower-test = { version = "^0.3" }
+tokio-test = "^0.2"
+tokio = "^0.2"
+futures-util = "^0.3.1"
+lazy_static = "1.4.0"
 
 [build-dependencies]
-tari_protobuf_build = { version = "^0.0", path="../../infrastructure/protobuf_build"}
+tari_common = { version = "^0.1", path="../../common"}

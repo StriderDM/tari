@@ -24,32 +24,50 @@ use super::{error::DhtOutboundError, message::DhtOutboundRequest};
 use crate::{
     actor::DhtRequester,
     broadcast_strategy::BroadcastStrategy,
+    crypt,
     discovery::DhtDiscoveryRequester,
-    envelope::{DhtMessageHeader, NodeDestination},
-    outbound::message::{DhtOutboundMessage, ForwardRequest, OutboundEncryption, SendMessageRequest},
+    envelope::{DhtMessageFlags, DhtMessageHeader, NodeDestination},
+    outbound::{
+        message::{DhtOutboundMessage, OutboundEncryption, SendFailure},
+        message_params::FinalSendMessageParams,
+        message_send_state::MessageSendState,
+        SendMessageResponse,
+    },
+    proto::envelope::{DhtMessageType, Network, OriginMac},
 };
+use bytes::Bytes;
+use digest::Digest;
 use futures::{
+    channel::oneshot,
     future,
     stream::{self, StreamExt},
     task::Context,
     Future,
-    Poll,
 };
 use log::*;
-use std::sync::Arc;
+use rand::rngs::OsRng;
+use std::{sync::Arc, task::Poll};
 use tari_comms::{
-    peer_manager::{NodeId, NodeIdentity, Peer, PeerFeatures},
-    types::CommsPublicKey,
+    message::{MessageExt, MessageTag},
+    peer_manager::{NodeId, NodeIdentity, Peer},
+    pipeline::PipelineError,
+    types::{Challenge, CommsPublicKey},
+    utils::signature,
 };
-use tari_comms_middleware::MiddlewareError;
+use tari_crypto::{
+    keys::PublicKey,
+    tari_utilities::{message_format::MessageFormat, ByteArray},
+};
+use tari_utilities::hex::Hex;
 use tower::{layer::Layer, Service, ServiceExt};
 
-const LOG_TARGET: &'static str = "comms::dht::outbound::broadcast_middleware";
+const LOG_TARGET: &str = "comms::dht::outbound::broadcast_middleware";
 
 pub struct BroadcastLayer {
     dht_requester: DhtRequester,
     dht_discovery_requester: DhtDiscoveryRequester,
     node_identity: Arc<NodeIdentity>,
+    target_network: Network,
 }
 
 impl BroadcastLayer {
@@ -57,12 +75,14 @@ impl BroadcastLayer {
         node_identity: Arc<NodeIdentity>,
         dht_requester: DhtRequester,
         dht_discovery_requester: DhtDiscoveryRequester,
+        target_network: Network,
     ) -> Self
     {
         BroadcastLayer {
             node_identity,
             dht_requester,
             dht_discovery_requester,
+            target_network,
         }
     }
 }
@@ -76,6 +96,7 @@ impl<S> Layer<S> for BroadcastLayer {
             Arc::clone(&self.node_identity),
             self.dht_requester.clone(),
             self.dht_discovery_requester.clone(),
+            self.target_network,
         )
     }
 }
@@ -88,6 +109,7 @@ pub struct BroadcastMiddleware<S> {
     dht_requester: DhtRequester,
     dht_discovery_requester: DhtDiscoveryRequester,
     node_identity: Arc<NodeIdentity>,
+    target_network: Network,
 }
 
 impl<S> BroadcastMiddleware<S> {
@@ -96,6 +118,7 @@ impl<S> BroadcastMiddleware<S> {
         node_identity: Arc<NodeIdentity>,
         dht_requester: DhtRequester,
         dht_discovery_requester: DhtDiscoveryRequester,
+        target_network: Network,
     ) -> Self
     {
         Self {
@@ -103,14 +126,15 @@ impl<S> BroadcastMiddleware<S> {
             dht_requester,
             dht_discovery_requester,
             node_identity,
+            target_network,
         }
     }
 }
 
 impl<S> Service<DhtOutboundRequest> for BroadcastMiddleware<S>
-where S: Service<DhtOutboundMessage, Response = (), Error = MiddlewareError> + Clone
+where S: Service<DhtOutboundMessage, Response = (), Error = PipelineError> + Clone
 {
-    type Error = MiddlewareError;
+    type Error = PipelineError;
     type Response = ();
 
     type Future = impl Future<Output = Result<(), Self::Error>>;
@@ -125,6 +149,7 @@ where S: Service<DhtOutboundMessage, Response = (), Error = MiddlewareError> + C
             Arc::clone(&self.node_identity),
             self.dht_requester.clone(),
             self.dht_discovery_requester.clone(),
+            self.target_network,
             msg,
         )
         .handle()
@@ -137,16 +162,19 @@ struct BroadcastTask<S> {
     dht_requester: DhtRequester,
     dht_discovery_requester: DhtDiscoveryRequester,
     request: Option<DhtOutboundRequest>,
+    target_network: Network,
 }
+type FinalMessageParts = (Option<Arc<CommsPublicKey>>, Option<Bytes>, Bytes);
 
 impl<S> BroadcastTask<S>
-where S: Service<DhtOutboundMessage, Response = (), Error = MiddlewareError>
+where S: Service<DhtOutboundMessage, Response = (), Error = PipelineError>
 {
     pub fn new(
         service: S,
         node_identity: Arc<NodeIdentity>,
         dht_requester: DhtRequester,
         dht_discovery_requester: DhtDiscoveryRequester,
+        target_network: Network,
         request: DhtOutboundRequest,
     ) -> Self
     {
@@ -155,15 +183,19 @@ where S: Service<DhtOutboundMessage, Response = (), Error = MiddlewareError>
             node_identity,
             dht_requester,
             dht_discovery_requester,
+            target_network,
             request: Some(request),
         }
     }
 
-    pub async fn handle(mut self) -> Result<(), MiddlewareError> {
+    pub async fn handle(mut self) -> Result<(), PipelineError> {
         let request = self.request.take().expect("request cannot be None");
         debug!(target: LOG_TARGET, "Processing outbound request {}", request);
-        let messages = self.generate_outbound_messages(request).await?;
-        debug!(
+        let messages = self
+            .generate_outbound_messages(request)
+            .await
+            .map_err(PipelineError::from_debug)?;
+        trace!(
             target: LOG_TARGET,
             "Passing {} message(s) to next_service",
             messages.len()
@@ -174,7 +206,7 @@ where S: Service<DhtOutboundMessage, Response = (), Error = MiddlewareError>
             .unordered()
             .filter_map(|result| future::ready(result.err()))
             .for_each(|err| {
-                error!(target: LOG_TARGET, "Error when sending broadcast messages: {}", err);
+                warn!(target: LOG_TARGET, "Error when sending broadcast messages: {}", err);
                 future::ready(())
             })
             .await;
@@ -188,66 +220,158 @@ where S: Service<DhtOutboundMessage, Response = (), Error = MiddlewareError>
     ) -> Result<Vec<DhtOutboundMessage>, DhtOutboundError>
     {
         match msg {
-            DhtOutboundRequest::SendMsg(request, reply_tx) => {
-                match self.generate_send_messages(*request).await {
-                    Ok(msgs) => {
-                        // Reply with the number of messages to be sent
-                        let _ = reply_tx.send(msgs.len());
-                        Ok(msgs)
-                    },
-                    Err(err) => {
-                        // Reply 0 messages sent
-                        let _ = reply_tx.send(0);
-                        Err(err)
-                    },
-                }
-            },
-            DhtOutboundRequest::Forward(request) => {
-                if self.node_identity.has_peer_features(PeerFeatures::MESSAGE_PROPAGATION) {
-                    self.generate_forward_messages(*request).await
-                } else {
-                    debug!(
-                        target: LOG_TARGET,
-                        "Message propagation is not enabled on this node. Discarding request to propagate message"
-                    );
-                    Ok(Vec::new())
-                }
+            DhtOutboundRequest::SendMessage(params, body, reply_tx) => {
+                self.handle_send_message(*params, body, reply_tx).await
             },
         }
     }
 
-    async fn select_or_discover_peer(
+    async fn handle_send_message(
         &mut self,
-        dest_public_key: CommsPublicKey,
-    ) -> Result<Option<Peer>, DhtOutboundError>
+        params: FinalSendMessageParams,
+        body: Bytes,
+        reply_tx: oneshot::Sender<SendMessageResponse>,
+    ) -> Result<Vec<DhtOutboundMessage>, DhtOutboundError>
     {
-        let mut peers = self
-            .dht_requester
-            .select_peers(BroadcastStrategy::DirectPublicKey(dest_public_key.clone()))
+        trace!(target: LOG_TARGET, "Send params: {:?}", params);
+        if params
+            .broadcast_strategy
+            .direct_public_key()
+            .filter(|pk| *pk == self.node_identity.public_key())
+            .is_some()
+        {
+            warn!(target: LOG_TARGET, "Attempt to send a message to ourselves");
+            let _ = reply_tx.send(SendMessageResponse::Failed(SendFailure::SendToOurselves));
+            return Err(DhtOutboundError::SendToOurselves);
+        }
+
+        let FinalSendMessageParams {
+            broadcast_strategy,
+            destination,
+            dht_message_type,
+            dht_message_flags,
+            encryption,
+            is_discovery_enabled,
+            force_origin,
+            dht_header,
+        } = params;
+
+        match self.select_peers(broadcast_strategy.clone()).await {
+            Ok(mut peers) => {
+                if reply_tx.is_canceled() {
+                    return Err(DhtOutboundError::ReplyChannelCanceled);
+                }
+
+                let mut reply_tx = Some(reply_tx);
+
+                trace!(
+                    target: LOG_TARGET,
+                    "Number of peers selected = {}, is_discovery_enabled = {}",
+                    peers.len(),
+                    is_discovery_enabled,
+                );
+
+                let is_broadcast = broadcast_strategy.is_broadcast();
+
+                // Discovery is required if:
+                //  - Discovery is enabled for this request
+                //  - There where no peers returned
+                //  - A direct public key broadcast strategy is used
+                if is_discovery_enabled && peers.is_empty() && broadcast_strategy.direct_public_key().is_some() {
+                    let (discovery_reply_tx, discovery_reply_rx) = oneshot::channel();
+                    let target_public_key = broadcast_strategy.into_direct_public_key().expect("already checked");
+
+                    let _ = reply_tx
+                        .take()
+                        .expect("cannot fail")
+                        .send(SendMessageResponse::PendingDiscovery(discovery_reply_rx));
+
+                    match self.initiate_peer_discovery(target_public_key).await {
+                        Ok(Some(peer)) => {
+                            // Set the reply_tx so that it can be used later
+                            reply_tx = Some(discovery_reply_tx);
+                            peers = vec![peer.node_id];
+                        },
+                        Ok(None) => {
+                            // Message sent to 0 peers
+                            let _ = discovery_reply_tx.send(SendMessageResponse::Queued(vec![].into()));
+                            return Ok(Vec::new());
+                        },
+                        Err(err @ DhtOutboundError::DiscoveryFailed) => {
+                            let _ = discovery_reply_tx.send(SendMessageResponse::Failed(SendFailure::DiscoveryFailed));
+                            return Err(err);
+                        },
+                        Err(err) => {
+                            let _ = discovery_reply_tx
+                                .send(SendMessageResponse::Failed(SendFailure::General(err.to_string())));
+                            return Err(err);
+                        },
+                    }
+                }
+
+                match self
+                    .generate_send_messages(
+                        peers,
+                        destination,
+                        dht_message_type,
+                        encryption,
+                        dht_header,
+                        dht_message_flags,
+                        force_origin,
+                        is_broadcast,
+                        body,
+                    )
+                    .await
+                {
+                    Ok((msgs, send_states)) => {
+                        // Reply with the `MessageTag`s for each message
+                        let _ = reply_tx
+                            .take()
+                            .expect("cannot fail")
+                            .send(SendMessageResponse::Queued(send_states.into()));
+
+                        Ok(msgs)
+                    },
+                    Err(err) => {
+                        let _ = reply_tx.take().expect("cannot fail").send(SendMessageResponse::Failed(
+                            SendFailure::FailedToGenerateMessages(err.to_string()),
+                        ));
+                        Err(err)
+                    },
+                }
+            },
+            Err(err) => {
+                let _ = reply_tx.send(SendMessageResponse::Failed(SendFailure::General(err.to_string())));
+                Err(err)
+            },
+        }
+    }
+
+    async fn select_peers(&mut self, broadcast_strategy: BroadcastStrategy) -> Result<Vec<NodeId>, DhtOutboundError> {
+        self.dht_requester
+            .select_peers(broadcast_strategy)
             .await
             .map_err(|err| {
                 error!(target: LOG_TARGET, "{}", err);
                 DhtOutboundError::PeerSelectionFailed
-            })?;
+            })
+    }
 
-        if peers.len() > 0 {
-            return Ok(Some(peers.remove(0)));
-        }
-
+    async fn initiate_peer_discovery(
+        &mut self,
+        dest_public_key: Box<CommsPublicKey>,
+    ) -> Result<Option<Peer>, DhtOutboundError>
+    {
         trace!(
             target: LOG_TARGET,
             "Initiating peer discovery for public key '{}'",
             dest_public_key
         );
 
-        // TODO: This works because we know that all non-DAN node IDs are/should be derived from the public key.
-        //       Once the DAN launches, this may not be the case.
-        let derived_node_id = NodeId::from_key(&dest_public_key).ok();
-
         // Peer not found, let's try and discover it
         match self
             .dht_discovery_requester
-            .discover_peer(dest_public_key, derived_node_id, NodeDestination::Unknown)
+            .discover_peer(dest_public_key.clone(), NodeDestination::PublicKey(dest_public_key))
             .await
         {
             // Peer found!
@@ -270,154 +394,161 @@ where S: Service<DhtOutboundMessage, Response = (), Error = MiddlewareError>
             // Error during discovery
             Err(err) => {
                 debug!(target: LOG_TARGET, "Peer discovery failed because '{}'.", err);
-                Ok(None)
+                Err(DhtOutboundError::DiscoveryFailed)
             },
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn generate_send_messages(
         &mut self,
-        send_message_request: SendMessageRequest,
-    ) -> Result<Vec<DhtOutboundMessage>, DhtOutboundError>
+        selected_peers: Vec<NodeId>,
+        destination: NodeDestination,
+        dht_message_type: DhtMessageType,
+        encryption: OutboundEncryption,
+        custom_header: Option<DhtMessageHeader>,
+        extra_flags: DhtMessageFlags,
+        force_origin: bool,
+        is_broadcast: bool,
+        body: Bytes,
+    ) -> Result<(Vec<DhtOutboundMessage>, Vec<MessageSendState>), DhtOutboundError>
     {
-        let SendMessageRequest {
-            broadcast_strategy,
-            destination,
-            encryption,
-            comms_flags,
-            dht_flags,
-            dht_message_type,
-            body,
-        } = send_message_request;
+        let dht_flags = encryption.flags() | extra_flags;
 
-        // Use the BroadcastStrategy to select appropriate peer(s) from PeerManager and then construct and send a
-        // individually wrapped MessageEnvelope to each selected peer
-        // If the broadcast strategy is DirectPublicKey and the peer is not known, peer discovery will be initiated.
-        let selected_peers = match broadcast_strategy.direct_public_key() {
-            Some(_) => {
-                let dest_public_key = broadcast_strategy.take_direct_public_key().expect("already checked");
-                self.select_or_discover_peer(dest_public_key)
-                    .await
-                    .map(|peer| peer.map(|p| vec![p]).unwrap_or_default())?
-            },
-            None => self
-                .dht_requester
-                .select_peers(broadcast_strategy)
-                .await
-                .map_err(|err| {
-                    error!(target: LOG_TARGET, "{}", err);
-                    DhtOutboundError::PeerSelectionFailed
-                })?,
-        };
+        let (ephemeral_public_key, origin_mac, body) = self.process_encryption(&encryption, force_origin, body)?;
 
-        // Create a DHT header
-        let dht_header = DhtMessageHeader::new(
-            // Final destination for this message
-            destination,
-            // Origin public key used to identify the origin and verify the signature
-            self.node_identity.public_key().clone(),
-            // Signing will happen later in the pipeline (SerializeMiddleware), left empty to prevent double work
-            Vec::new(),
-            dht_message_type,
-            dht_flags,
-        );
+        if is_broadcast {
+            self.add_to_dedup_cache(&body).await?;
+        }
 
-        // Construct a MessageEnvelope for each recipient
+        // Construct a DhtOutboundMessage for each recipient
         let messages = selected_peers
             .into_iter()
-            .map(|peer| {
-                DhtOutboundMessage::new(peer, dht_header.clone(), encryption.clone(), comms_flags, body.clone())
+            .map(|node_id| {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let tag = MessageTag::new();
+                let send_state = MessageSendState::new(tag, reply_rx);
+                (
+                    DhtOutboundMessage {
+                        tag,
+                        destination_node_id: node_id,
+                        destination: destination.clone(),
+                        dht_message_type,
+                        network: self.target_network,
+                        dht_flags,
+                        custom_header: custom_header.clone(),
+                        body: body.clone(),
+                        reply_tx: reply_tx.into(),
+                        ephemeral_public_key: ephemeral_public_key.clone(),
+                        origin_mac: origin_mac.clone(),
+                        is_broadcast,
+                    },
+                    send_state,
+                )
             })
             .collect::<Vec<_>>();
 
-        Ok(messages)
+        Ok(messages.into_iter().unzip())
     }
 
-    async fn generate_forward_messages(
-        &mut self,
-        forward_request: ForwardRequest,
-    ) -> Result<Vec<DhtOutboundMessage>, DhtOutboundError>
-    {
-        let ForwardRequest {
-            broadcast_strategy,
-            dht_header,
-            comms_flags,
-            body,
-        } = forward_request;
-        // Use the BroadcastStrategy to select appropriate peer(s) from PeerManager and then forward the
-        // received message to each selected peer
-        let selected_node_identities = self
-            .dht_requester
-            .select_peers(broadcast_strategy)
+    async fn add_to_dedup_cache(&mut self, body: &[u8]) -> Result<bool, DhtOutboundError> {
+        let hash = Challenge::new().chain(&body).result().to_vec();
+        trace!(
+            target: LOG_TARGET,
+            "Dedup added message hash {} to cache for message",
+            hash.to_hex(),
+        );
+
+        self.dht_requester
+            .insert_message_hash(hash)
             .await
-            .map_err(|err| {
-                error!(target: LOG_TARGET, "{}", err);
-                DhtOutboundError::PeerSelectionFailed
-            })?;
-
-        let messages = selected_node_identities
-            .into_iter()
-            .map(|peer| {
-                DhtOutboundMessage::new(
-                    peer,
-                    dht_header.clone(),
-                    // Forwarding the message as is, no encryption
-                    OutboundEncryption::None,
-                    comms_flags,
-                    body.clone(),
-                )
-            })
-            .collect();
-
-        Ok(messages)
+            .map_err(|_| DhtOutboundError::FailedToInsertMessageHash)
     }
+
+    fn process_encryption(
+        &self,
+        encryption: &OutboundEncryption,
+        include_origin: bool,
+        body: Bytes,
+    ) -> Result<FinalMessageParts, DhtOutboundError>
+    {
+        match encryption {
+            OutboundEncryption::EncryptFor(public_key) => {
+                trace!(target: LOG_TARGET, "Encrypting message for {}", public_key);
+                // Generate ephemeral public/private key pair and ECDH shared secret
+                let (e_sk, e_pk) = CommsPublicKey::random_keypair(&mut OsRng);
+                let shared_ephemeral_secret = crypt::generate_ecdh_secret(&e_sk, &**public_key);
+                // Encrypt the message with the body
+                let encrypted_body = crypt::encrypt(&shared_ephemeral_secret, &body)?;
+
+                // Sign the encrypted message
+                let origin_mac = create_origin_mac(&self.node_identity, &encrypted_body)?;
+                // Encrypt and set the origin field
+                let encrypted_origin_mac = crypt::encrypt(&shared_ephemeral_secret, &origin_mac)?;
+                Ok((
+                    Some(Arc::new(e_pk)),
+                    Some(encrypted_origin_mac.into()),
+                    encrypted_body.into(),
+                ))
+            },
+            OutboundEncryption::None => {
+                trace!(target: LOG_TARGET, "Encryption not requested for message");
+
+                if include_origin {
+                    let origin_mac = create_origin_mac(&self.node_identity, &body)?;
+                    Ok((None, Some(origin_mac.into()), body))
+                } else {
+                    Ok((None, None, body))
+                }
+            },
+        }
+    }
+}
+
+fn create_origin_mac(node_identity: &NodeIdentity, body: &[u8]) -> Result<Vec<u8>, DhtOutboundError> {
+    let signature = signature::sign(&mut OsRng, node_identity.secret_key().clone(), body)?;
+
+    let mac = OriginMac {
+        public_key: node_identity.public_key().to_vec(),
+        signature: signature.to_binary()?,
+    };
+    Ok(mac.to_encoded_bytes())
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
-        broadcast_strategy::BroadcastStrategy,
-        envelope::{DhtMessageFlags, NodeDestination},
-        outbound::message::OutboundEncryption,
-        proto::envelope::DhtMessageType,
-        test_utils::{
-            create_dht_actor_mock,
-            create_dht_discovery_mock,
-            make_peer,
-            service_spy,
-            DhtDiscoveryMockState,
-            DhtMockState,
-        },
+        outbound::SendMessageParams,
+        test_utils::{create_dht_actor_mock, create_dht_discovery_mock, make_peer, service_spy, DhtDiscoveryMockState},
     };
     use futures::channel::oneshot;
     use rand::rngs::OsRng;
     use std::time::Duration;
     use tari_comms::{
-        connection::NetAddress,
-        message::MessageFlags,
+        multiaddr::Multiaddr,
         peer_manager::{NodeId, Peer, PeerFeatures, PeerFlags},
         types::CommsPublicKey,
     };
     use tari_crypto::keys::PublicKey;
-    use tokio::runtime::Runtime;
+    use tari_test_utils::unpack_enum;
+    use tokio::task;
 
-    #[test]
-    fn send_message_flood() {
-        let rt = Runtime::new().unwrap();
-
+    #[tokio_macros::test_basic]
+    async fn send_message_flood() {
         let pk = CommsPublicKey::default();
         let example_peer = Peer::new(
             pk.clone(),
             NodeId::from_key(&pk).unwrap(),
-            vec!["127.0.0.1:9999".parse::<NetAddress>().unwrap()].into(),
+            vec!["/ip4/127.0.0.1/tcp/9999".parse::<Multiaddr>().unwrap()].into(),
             PeerFlags::empty(),
             PeerFeatures::COMMUNICATION_NODE,
+            &[],
         );
 
         let other_peer = {
             let mut p = example_peer.clone();
-            let (_, pk) = CommsPublicKey::random_keypair(&mut OsRng::new().unwrap());
+            let (_, pk) = CommsPublicKey::random_keypair(&mut OsRng);
             p.node_id = NodeId::from_key(&pk).unwrap();
             p.public_key = pk;
             p
@@ -425,115 +556,110 @@ mod test {
 
         let node_identity = Arc::new(
             NodeIdentity::random(
-                &mut OsRng::new().unwrap(),
-                "127.0.0.1:9000".parse().unwrap(),
+                &mut OsRng,
+                "/ip4/127.0.0.1/tcp/9000".parse().unwrap(),
                 PeerFeatures::COMMUNICATION_NODE,
             )
             .unwrap(),
         );
 
-        let (dht_requester, mut dht_mock) = create_dht_actor_mock(10);
+        let (dht_requester, dht_mock) = create_dht_actor_mock(10);
         let (dht_discover_requester, _) = create_dht_discovery_mock(10, Duration::from_secs(10));
 
-        let mock_state = DhtMockState::new();
+        let mock_state = dht_mock.get_shared_state();
         mock_state.set_select_peers_response(vec![example_peer.clone(), other_peer.clone()]);
-        dht_mock.set_shared_state(mock_state);
 
-        rt.spawn(dht_mock.run());
+        task::spawn(dht_mock.run());
 
         let spy = service_spy();
 
-        let mut service =
-            BroadcastMiddleware::new(spy.to_service(), node_identity, dht_requester, dht_discover_requester);
+        let mut service = BroadcastMiddleware::new(
+            spy.to_service::<PipelineError>(),
+            node_identity,
+            dht_requester,
+            dht_discover_requester,
+            Network::LocalTest,
+        );
         let (reply_tx, _reply_rx) = oneshot::channel();
 
-        rt.block_on(service.call(DhtOutboundRequest::SendMsg(
-            Box::new(SendMessageRequest {
-                broadcast_strategy: BroadcastStrategy::Flood,
-                comms_flags: MessageFlags::NONE,
-                destination: NodeDestination::Unknown,
-                encryption: OutboundEncryption::None,
-                dht_message_type: DhtMessageType::None,
-                dht_flags: DhtMessageFlags::NONE,
-                body: "custom_msg".as_bytes().to_vec(),
-            }),
-            reply_tx,
-        )))
-        .unwrap();
+        service
+            .call(DhtOutboundRequest::SendMessage(
+                Box::new(SendMessageParams::new().flood().finish()),
+                "custom_msg".as_bytes().into(),
+                reply_tx,
+            ))
+            .await
+            .unwrap();
 
         assert_eq!(spy.call_count(), 2);
         let requests = spy.take_requests();
         assert!(requests
             .iter()
-            .any(|msg| msg.destination_peer.node_id == example_peer.node_id));
-        assert!(requests
-            .iter()
-            .any(|msg| msg.destination_peer.node_id == other_peer.node_id));
+            .any(|msg| msg.destination_node_id == example_peer.node_id));
+        assert!(requests.iter().any(|msg| msg.destination_node_id == other_peer.node_id));
     }
 
-    #[test]
-    fn send_message_direct_not_found() {
+    #[tokio_macros::test_basic]
+    async fn send_message_direct_not_found() {
         // Test for issue https://github.com/tari-project/tari/issues/959
-        let rt = Runtime::new().unwrap();
 
         let pk = CommsPublicKey::default();
         let node_identity = NodeIdentity::random(
-            &mut OsRng::new().unwrap(),
-            "127.0.0.1:9000".parse().unwrap(),
+            &mut OsRng,
+            "/ip4/127.0.0.1/tcp/9000".parse().unwrap(),
             PeerFeatures::COMMUNICATION_NODE,
         )
         .unwrap();
 
         let (dht_requester, dht_mock) = create_dht_actor_mock(10);
-        rt.spawn(dht_mock.run());
+        task::spawn(dht_mock.run());
         let (dht_discover_requester, _) = create_dht_discovery_mock(10, Duration::from_secs(10));
         let spy = service_spy();
 
         let mut service = BroadcastMiddleware::new(
-            spy.to_service(),
+            spy.to_service::<PipelineError>(),
             Arc::new(node_identity),
             dht_requester,
             dht_discover_requester,
+            Network::LocalTest,
         );
         let (reply_tx, reply_rx) = oneshot::channel();
 
-        rt.block_on(service.call(DhtOutboundRequest::SendMsg(
-            Box::new(SendMessageRequest {
-                broadcast_strategy: BroadcastStrategy::DirectPublicKey(pk),
-                comms_flags: MessageFlags::NONE,
-                destination: NodeDestination::Unknown,
-                encryption: OutboundEncryption::None,
-                dht_message_type: DhtMessageType::None,
-                dht_flags: DhtMessageFlags::NONE,
-                body: "custom_msg".as_bytes().to_vec(),
-            }),
-            reply_tx,
-        )))
-        .unwrap();
+        service
+            .call(DhtOutboundRequest::SendMessage(
+                Box::new(
+                    SendMessageParams::new()
+                        .direct_public_key(pk)
+                        .with_discovery(false)
+                        .finish(),
+                ),
+                Bytes::from_static(b"custom_msg"),
+                reply_tx,
+            ))
+            .await
+            .unwrap();
 
-        let num_peers_selected = rt.block_on(reply_rx).unwrap();
-        assert_eq!(num_peers_selected, 0);
-
+        let send_message_response = reply_rx.await.unwrap();
+        unpack_enum!(SendMessageResponse::Queued(tags) = send_message_response);
+        assert_eq!(tags.len(), 0);
         assert_eq!(spy.call_count(), 0);
     }
 
-    #[test]
-    fn send_message_direct_dht_discovery() {
-        let rt = Runtime::new().unwrap();
-
+    #[tokio_macros::test_basic]
+    async fn send_message_direct_dht_discovery() {
         let node_identity = NodeIdentity::random(
-            &mut OsRng::new().unwrap(),
-            "127.0.0.1:9000".parse().unwrap(),
+            &mut OsRng,
+            "/ip4/127.0.0.1/tcp/9000".parse().unwrap(),
             PeerFeatures::COMMUNICATION_NODE,
         )
         .unwrap();
 
         let (dht_requester, dht_mock) = create_dht_actor_mock(10);
-        rt.spawn(dht_mock.run());
+        task::spawn(dht_mock.run());
         let (dht_discover_requester, mut discovery_mock) = create_dht_discovery_mock(10, Duration::from_secs(10));
         let dht_discovery_state = DhtDiscoveryMockState::new();
         discovery_mock.set_shared_state(dht_discovery_state.clone());
-        rt.spawn(discovery_mock.run());
+        task::spawn(discovery_mock.run());
 
         let peer_to_discover = make_peer();
         dht_discovery_state.set_discover_peer_response(peer_to_discover.clone());
@@ -541,31 +667,35 @@ mod test {
         let spy = service_spy();
 
         let mut service = BroadcastMiddleware::new(
-            spy.to_service(),
+            spy.to_service::<PipelineError>(),
             Arc::new(node_identity),
             dht_requester,
             dht_discover_requester,
+            Network::LocalTest,
         );
         let (reply_tx, reply_rx) = oneshot::channel();
 
-        rt.block_on(service.call(DhtOutboundRequest::SendMsg(
-            Box::new(SendMessageRequest {
-                broadcast_strategy: BroadcastStrategy::DirectPublicKey(peer_to_discover.public_key.clone()),
-                comms_flags: MessageFlags::NONE,
-                destination: NodeDestination::Unknown,
-                encryption: OutboundEncryption::None,
-                dht_message_type: DhtMessageType::None,
-                dht_flags: DhtMessageFlags::NONE,
-                body: "custom_msg".as_bytes().to_vec(),
-            }),
-            reply_tx,
-        )))
-        .unwrap();
+        service
+            .call(DhtOutboundRequest::SendMessage(
+                Box::new(
+                    SendMessageParams::new()
+                        .direct_public_key(peer_to_discover.public_key.clone())
+                        .with_discovery(true)
+                        .finish(),
+                ),
+                "custom_msg".as_bytes().into(),
+                reply_tx,
+            ))
+            .await
+            .unwrap();
 
-        let num_peers_selected = rt.block_on(reply_rx).unwrap();
-        assert_eq!(num_peers_selected, 1);
+        let send_message_response = reply_rx.await.unwrap();
+
+        unpack_enum!(SendMessageResponse::PendingDiscovery(await_discovery) = send_message_response);
+        let discovery_reply = await_discovery.await.unwrap();
         assert_eq!(dht_discovery_state.call_count(), 1);
-
+        unpack_enum!(SendMessageResponse::Queued(tags) = discovery_reply);
+        assert_eq!(tags.len(), 1);
         assert_eq!(spy.call_count(), 1);
     }
 }

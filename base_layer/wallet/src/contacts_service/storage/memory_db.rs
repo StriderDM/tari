@@ -26,6 +26,7 @@ use crate::contacts_service::{
 };
 use std::sync::{Arc, RwLock};
 
+#[derive(Default)]
 pub struct InnerDatabase {
     contacts: Vec<Contact>,
 }
@@ -36,6 +37,7 @@ impl InnerDatabase {
     }
 }
 
+#[derive(Default)]
 pub struct ContactsServiceMemoryDatabase {
     db: Arc<RwLock<InnerDatabase>>,
 }
@@ -57,21 +59,19 @@ impl ContactsBackend for ContactsServiceMemoryDatabase {
                 .iter()
                 .find(|v| &v.public_key == pk)
                 .map(|c| DbValue::Contact(Box::new(c.clone()))),
-            DbKey::Contacts => Some(DbValue::Contacts(Box::new(db.contacts.clone()))),
+            DbKey::Contacts => Some(DbValue::Contacts(db.contacts.clone())),
         };
 
         Ok(result)
     }
 
-    fn write(&mut self, op: WriteOperation) -> Result<Option<DbValue>, ContactsServiceStorageError> {
+    fn write(&self, op: WriteOperation) -> Result<Option<DbValue>, ContactsServiceStorageError> {
         let mut db = acquire_write_lock!(self.db);
         match op {
-            WriteOperation::Insert(kvp) => match kvp {
-                DbKeyValuePair::Contact(pk, c) => {
-                    if db.contacts.iter().any(|c| c.public_key == pk) {
-                        return Err(ContactsServiceStorageError::DuplicateContact);
-                    }
-                    db.contacts.push(c)
+            WriteOperation::Upsert(kvp) => match kvp {
+                DbKeyValuePair::Contact(pk, c) => match db.contacts.iter_mut().find(|i| i.public_key == pk) {
+                    None => db.contacts.push(c),
+                    Some(existing_contact) => existing_contact.alias = c.alias,
                 },
             },
             WriteOperation::Remove(k) => match k {

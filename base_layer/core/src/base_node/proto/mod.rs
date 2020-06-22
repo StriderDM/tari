@@ -20,20 +20,16 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-pub mod base_node {
-    tari_utilities::include_proto_package!("tari.base_node");
-}
+#[cfg(feature = "base_node_proto")]
+pub use crate::proto::generated::base_node;
 
-use crate::proto::core;
-// Required for `super::types` used in generated files
-use tari_transactions::proto::types;
-
+#[cfg(feature = "base_node")]
 pub mod chain_metadata;
-pub mod mmr_state_request;
+#[cfg(feature = "base_node")]
 pub mod mmr_tree;
-pub mod mutable_mmr_leaf_nodes;
-pub mod mutable_mmr_state;
+#[cfg(feature = "base_node")]
 pub mod request;
+#[cfg(feature = "base_node")]
 pub mod response;
-
-pub use base_node::{BaseNodeServiceRequest, BaseNodeServiceResponse};
+#[cfg(feature = "base_node")]
+pub use base_node::{BaseNodeServiceRequest, BaseNodeServiceResponse, ChainMetadata};

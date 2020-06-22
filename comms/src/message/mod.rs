@@ -59,42 +59,33 @@
 //! [MessageHeader]: ./message/struct.MessageHeader.html
 //! [MessageData]: ./message/struct.MessageData.html
 //! [DomainConnector]: ../domain_connector/struct.DomainConnector.html
-use bitflags::*;
-use serde::{Deserialize, Serialize};
 
 #[macro_use]
 mod envelope;
-mod error;
-mod inbound_message;
+pub use envelope::EnvelopeBody;
 
-pub use self::{
-    envelope::{Envelope, EnvelopeBody, EnvelopeHeader, MessageEnvelopeHeader},
-    error::MessageError,
-    inbound_message::*,
-};
+mod error;
+pub use error::MessageError;
+
+mod inbound;
+pub use inbound::InboundMessage;
+
+mod outbound;
+pub use outbound::{MessagingReplyRx, MessagingReplyTx, OutboundMessage};
+
+mod tag;
+pub use tag::MessageTag;
 
 pub trait MessageExt: prost::Message {
-    fn to_encoded_bytes(&self) -> Result<Vec<u8>, MessageError>
+    /// Encodes a message, allocating the buffer on the heap as necessary
+    fn to_encoded_bytes(&self) -> Vec<u8>
     where Self: Sized {
-        let mut buf = Vec::new();
-        self.encode(&mut buf)?;
-        Ok(buf)
+        let mut buf = Vec::with_capacity(self.encoded_len());
+        self.encode(&mut buf).expect(
+            "prost::Message::encode documentation says it is infallible unless the buffer has insufficient capacity. \
+             This buffer's capacity was set with encoded_len",
+        );
+        buf
     }
 }
 impl<T: prost::Message> MessageExt for T {}
-
-/// Represents a single message frame.
-pub type Frame = Vec<u8>;
-/// Represents a collection of frames which make up a multipart message.
-pub type FrameSet = Vec<Frame>;
-
-bitflags! {
-    /// Used to indicate characteristics of the incoming or outgoing message, such
-    /// as whether the message is encrypted.
-    #[derive(Deserialize, Serialize)]
-    pub struct MessageFlags: u32 {
-        const NONE = 0b0000_0000;
-        const ENCRYPTED = 0b0000_0001;
-        const FORWARDED = 0b0000_0010;
-    }
-}

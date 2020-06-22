@@ -20,24 +20,33 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{output_manager_service::error::OutputManagerError, transaction_service::storage::database::DbKey};
+use crate::{
+    output_manager_service::{error::OutputManagerError, TxId},
+    transaction_service::storage::database::DbKey,
+};
 use derive_error::Error;
+use diesel::result::Error as DieselError;
+use futures::channel::oneshot::Canceled;
+use serde_json::Error as SerdeJsonError;
+use tari_comms::peer_manager::node_id::NodeIdError;
 use tari_comms_dht::outbound::DhtOutboundError;
+use tari_core::transactions::{transaction::TransactionError, transaction_protocol::TransactionProtocolError};
+use tari_p2p::services::liveness::error::LivenessError;
 use tari_service_framework::reply_channel::TransportChannelError;
-use tari_transactions::{transaction::TransactionError, transaction_protocol::TransactionProtocolError};
 use time::OutOfRangeError;
+use tokio::sync::broadcast::RecvError;
 
 #[derive(Debug, Error)]
 pub enum TransactionServiceError {
-    // Transaction protocol is not in the correct state for this operation
+    /// Transaction protocol is not in the correct state for this operation
     InvalidStateError,
-    // Transaction Protocol Error
+    /// Transaction Protocol Error
     TransactionProtocolError(TransactionProtocolError),
-    // The message being process is not recognized by the Transaction Manager
+    /// The message being processed is not recognized by the Transaction Manager
     InvalidMessageTypeError,
-    // A message for a specific tx_id has been repeated
+    /// A message for a specific tx_id has been repeated
     RepeatedMessageError,
-    // A recipient reply was received for a non-existent tx_id
+    /// A recipient reply was received for a non-existent tx_id
     TransactionDoesNotExistError,
     /// The Outbound Message Service is not initialized
     OutboundMessageServiceNotInitialized,
@@ -49,7 +58,35 @@ pub enum TransactionServiceError {
     ApiReceiveFailed,
     /// An error has occurred reading or writing the event subscriber stream
     EventStreamError,
-    OutboundError(DhtOutboundError),
+    /// The Source Public Key on the received transaction does not match the transaction with the same TX_ID in the
+    /// database
+    InvalidSourcePublicKey,
+    /// The transaction does not contain the receivers output
+    ReceiverOutputNotFound,
+    /// Outbound Service send failed
+    OutboundSendFailure,
+    /// Outbound Service Discovery process needed to be conducted before message could be sent. The result of the
+    /// process will be communicated via the callback at some time in the future (could be minutes)
+    #[error(no_from, non_std)]
+    OutboundSendDiscoveryInProgress(TxId),
+    /// Discovery process failed to return a result
+    #[error(no_from, non_std)]
+    DiscoveryProcessFailed(TxId),
+    /// Invalid Completed Transaction provided
+    InvalidCompletedTransaction,
+    /// No Base Node public keys are provided for Base chain broadcast and monitoring
+    NoBaseNodeKeysProvided,
+    /// Error sending data to Protocol via register channels
+    ProtocolChannelError,
+    /// Transaction detected as rejected by mempool
+    MempoolRejection,
+    /// Mempool response key does not match on that is expected
+    UnexpectedMempoolResponse,
+    /// Base Node response key does not match on that is expected
+    UnexpectedBaseNodeResponse,
+    /// The current transaction has been cancelled
+    TransactionCancelled,
+    DhtOutboundError(DhtOutboundError),
     OutputManagerError(OutputManagerError),
     TransportChannelError(TransportChannelError),
     TransactionStorageError(TransactionStorageError),
@@ -59,9 +96,15 @@ pub enum TransactionServiceError {
     #[error(msg_embedded, no_from, non_std)]
     TestHarnessError(String),
     TransactionError(TransactionError),
+    #[error(msg_embedded, no_from, non_std)]
+    ConversionError(String),
+    NodeIdError(NodeIdError),
+    BroadcastRecvError(RecvError),
+    OneshotCancelled(Canceled),
+    LivenessError(LivenessError),
 }
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum TransactionStorageError {
     /// Tried to insert an output that already exists in the database
     DuplicateOutput,
@@ -73,5 +116,37 @@ pub enum TransactionStorageError {
     OperationNotSupported,
     /// Could not find all values specified for batch operation
     ValuesNotFound,
+    /// Transaction is already present in the database
+    TransactionAlreadyExists,
     OutOfRangeError(OutOfRangeError),
+    /// Error converting a type
+    ConversionError,
+    SerdeJsonError(SerdeJsonError),
+    R2d2Error,
+    DieselError(DieselError),
+    DieselConnectionError(diesel::ConnectionError),
+    #[error(msg_embedded, no_from, non_std)]
+    DatabaseMigrationError(String),
+    #[error(msg_embedded, non_std, no_from)]
+    BlockingTaskSpawnError(String),
+}
+
+/// This error type is used to return TransactionServiceErrors from inside a Transaction Service protocol but also
+/// include the ID of the protocol
+#[derive(Debug)]
+pub struct TransactionServiceProtocolError {
+    pub id: u64,
+    pub error: TransactionServiceError,
+}
+
+impl TransactionServiceProtocolError {
+    pub fn new(id: u64, error: TransactionServiceError) -> Self {
+        Self { id, error }
+    }
+}
+
+impl From<TransactionServiceProtocolError> for TransactionServiceError {
+    fn from(tspe: TransactionServiceProtocolError) -> Self {
+        tspe.error
+    }
 }

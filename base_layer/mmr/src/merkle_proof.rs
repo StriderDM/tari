@@ -19,13 +19,10 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-//
-// Portions of this file were originally copyrighted (c) 2018 The Grin Developers, issued under the Apache License,
-// Version 2.0, available at http://www.apache.org/licenses/LICENSE-2.0.
 
 use crate::{
     backend::ArrayLike,
-    common::{family, family_branch, find_peaks, hash_together, is_leaf, is_left_sibling, leaf_index},
+    common::{family, family_branch, find_peaks, hash_together, is_leaf, is_left_sibling, node_index},
     error::MerkleMountainRangeError,
     serde_support,
     Hash,
@@ -88,13 +85,13 @@ impl MerkleProof {
     /// See [MerkleProof::for_node] for more details on how the proof is constructed.
     pub fn for_leaf_node<D, B>(
         mmr: &MerkleMountainRange<D, B>,
-        leaf_pos: usize,
+        leaf_index: usize,
     ) -> Result<MerkleProof, MerkleProofError>
     where
         D: Digest,
         B: ArrayLike<Value = Hash>,
     {
-        let pos = leaf_index(leaf_pos);
+        let pos = node_index(leaf_index);
         MerkleProof::generate_proof(mmr, pos)
     }
 
@@ -127,7 +124,8 @@ impl MerkleProof {
         B: ArrayLike<Value = Hash>,
     {
         // check we actually have a hash in the MMR at this pos
-        mmr.get_node_hash(pos)?.ok_or(MerkleProofError::HashNotFound(pos))?;
+        mmr.get_node_hash(pos)?
+            .ok_or_else(|| MerkleProofError::HashNotFound(pos))?;
         let mmr_size = mmr.len()?;
         let family_branch = family_branch(pos, mmr_size);
 
@@ -136,7 +134,7 @@ impl MerkleProof {
             .iter()
             .map(|(_, sibling)| {
                 mmr.get_node_hash(*sibling)?
-                    .ok_or(MerkleProofError::HashNotFound(*sibling))
+                    .ok_or_else(|| MerkleProofError::HashNotFound(*sibling))
             })
             .collect::<Result<_, _>>()?;
 
@@ -153,7 +151,7 @@ impl MerkleProof {
             if peak_index != peak_pos {
                 let hash = mmr
                     .get_node_hash(peak_index)?
-                    .ok_or(MerkleProofError::HashNotFound(peak_index))?
+                    .ok_or_else(|| MerkleProofError::HashNotFound(peak_index))?
                     .clone();
                 peak_hashes.push(hash);
             }
@@ -169,10 +167,10 @@ impl MerkleProof {
         &self,
         root: &HashSlice,
         hash: &HashSlice,
-        leaf_pos: usize,
+        leaf_index: usize,
     ) -> Result<(), MerkleProofError>
     {
-        let pos = leaf_index(leaf_pos);
+        let pos = node_index(leaf_index);
         self.verify::<D>(root, hash, pos)
     }
 
@@ -253,10 +251,6 @@ impl MerkleProof {
         let sibling = self.path.remove(0); // FIXME Compare perf vs using a VecDeque
         let (parent_pos, sibling_pos) = family(pos);
         if parent_pos > self.mmr_size {
-            error!(
-                "Found edge case. pos: {}, peaks: {:?}, mmr_size: {}, siblings: {:?}, peak_path: {:?}",
-                pos, peaks, self.mmr_size, &self.path, &self.peaks
-            );
             Err(MerkleProofError::Unexpected)
         } else {
             let parent = if is_left_sibling(sibling_pos) {

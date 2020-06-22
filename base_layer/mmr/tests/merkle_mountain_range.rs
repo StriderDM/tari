@@ -20,6 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[allow(dead_code)]
 mod support;
 
 use digest::Digest;
@@ -145,11 +146,35 @@ fn restore_from_leaf_hashes() {
     assert!(mmr.push(&int_to_hash(5)).is_ok());
     assert_eq!(mmr.len(), Ok(10));
 
-    assert!(mmr.restore(leaf_hashes).is_ok());
+    assert!(mmr.assign(leaf_hashes).is_ok());
     assert_eq!(mmr.len(), Ok(7));
     assert_eq!(mmr.get_leaf_hash(0), Ok(Some(h0)));
     assert_eq!(mmr.get_leaf_hash(1), Ok(Some(h1)));
     assert_eq!(mmr.get_leaf_hash(2), Ok(Some(h2)));
     assert_eq!(mmr.get_leaf_hash(3), Ok(Some(h3)));
     assert_eq!(mmr.get_leaf_hash(4), Ok(None));
+}
+
+#[test]
+fn find_leaf_index() {
+    let mut mmr = MerkleMountainRange::<Hasher, _>::new(Vec::default());
+    let h0 = int_to_hash(0);
+    let h1 = int_to_hash(1);
+    let h2 = int_to_hash(2);
+    let h3 = int_to_hash(3);
+    let h4 = int_to_hash(4);
+    let h5 = int_to_hash(5);
+    assert!(mmr.push(&h0).is_ok());
+    assert!(mmr.push(&h1).is_ok());
+    assert!(mmr.push(&h2).is_ok());
+    assert!(mmr.push(&h3).is_ok());
+    assert!(mmr.push(&h4).is_ok());
+    assert_eq!(mmr.len(), Ok(8));
+
+    assert_eq!(mmr.find_leaf_index(&h0), Ok(Some(0)));
+    assert_eq!(mmr.find_leaf_index(&h1), Ok(Some(1)));
+    assert_eq!(mmr.find_leaf_index(&h2), Ok(Some(2)));
+    assert_eq!(mmr.find_leaf_index(&h3), Ok(Some(3)));
+    assert_eq!(mmr.find_leaf_index(&h4), Ok(Some(4)));
+    assert_eq!(mmr.find_leaf_index(&h5), Ok(None));
 }

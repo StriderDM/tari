@@ -20,98 +20,124 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::consts::DHT_ENVELOPE_HEADER_VERSION;
 use bitflags::bitflags;
-use derive_error::Error;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
     convert::{TryFrom, TryInto},
     fmt,
     fmt::Display,
 };
-use tari_comms::{peer_manager::NodeId, types::CommsPublicKey, utils::signature};
-use tari_utilities::{hex::Hex, ByteArray, ByteArrayError};
+use tari_comms::{message::MessageTag, peer_manager::NodeId, types::CommsPublicKey};
+use tari_utilities::{ByteArray, ByteArrayError};
+use thiserror::Error;
 
 // Re-export applicable protos
-pub use crate::proto::envelope::{dht_header::Destination, DhtEnvelope, DhtHeader, DhtMessageType};
+pub use crate::proto::envelope::{dht_header::Destination, DhtEnvelope, DhtHeader, DhtMessageType, Network};
 
 #[derive(Debug, Error)]
 pub enum DhtMessageError {
-    /// Invalid node destination
+    #[error("Invalid node destination")]
     InvalidDestination,
-    /// Invalid origin public key
-    InvalidOriginPublicKey,
-    /// Invalid or unrecognised DHT message type
+    #[error("Invalid origin public key")]
+    InvalidOrigin,
+    #[error("Invalid or unrecognised DHT message type")]
     InvalidMessageType,
-    /// Invalid or unrecognised DHT message flags
+    #[error("Invalid or unrecognised network type")]
+    InvalidNetwork,
+    #[error("Invalid or unrecognised DHT message flags")]
     InvalidMessageFlags,
-    /// Header was omitted from the message
+    #[error("Invalid ephemeral public key")]
+    InvalidEphemeralPublicKey,
+    #[error("Header was omitted from the message")]
     HeaderOmitted,
+}
+
+impl fmt::Display for DhtMessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Debug output works well for simple enums
+        fmt::Debug::fmt(self, f)
+    }
 }
 
 bitflags! {
     /// Used to indicate characteristics of the incoming or outgoing message, such
     /// as whether the message is encrypted.
-    #[derive(Deserialize, Serialize)]
+    #[derive(Deserialize, Serialize, Default)]
     pub struct DhtMessageFlags: u32 {
-        const NONE = 0b0000_0000;
-        const ENCRYPTED = 0b0000_0001;
+        const NONE = 0x00;
+        /// Set if the message is encrypted
+        const ENCRYPTED = 0x01;
+    }
+}
+
+impl DhtMessageFlags {
+    pub fn is_encrypted(self) -> bool {
+        self.contains(Self::ENCRYPTED)
     }
 }
 
 impl DhtMessageType {
-    pub fn is_dht_message(&self) -> bool {
+    pub fn is_dht_message(self) -> bool {
+        self.is_dht_discovery() || self.is_dht_join()
+    }
+
+    pub fn is_dht_discovery(self) -> bool {
         match self {
-            DhtMessageType::None => false,
-            _ => true,
+            DhtMessageType::Discovery => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_dht_join(self) -> bool {
+        match self {
+            DhtMessageType::Join => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_saf_message(self) -> bool {
+        use DhtMessageType::*;
+        match self {
+            SafRequestMessages | SafStoredMessages => true,
+            _ => false,
         }
     }
 }
 
 /// This struct mirrors the protobuf version of DhtHeader but is more ergonomic to work with.
 /// It is preferable to not to expose the generated prost structs publicly.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DhtMessageHeader {
     pub version: u32,
     pub destination: NodeDestination,
-    /// Origin public key of the message. This can be the same peer that sent the message
-    /// or another peer if the message should be forwarded.
-    pub origin_public_key: CommsPublicKey,
-    pub origin_signature: Vec<u8>,
+    /// Encoded DhtOrigin. This can refer to the same peer that sent the message
+    /// or another peer if the message is being propagated.
+    pub origin_mac: Vec<u8>,
+    pub ephemeral_public_key: Option<CommsPublicKey>,
     pub message_type: DhtMessageType,
+    pub network: Network,
     pub flags: DhtMessageFlags,
+    pub message_tag: MessageTag,
 }
 
 impl DhtMessageHeader {
-    pub fn new(
-        destination: NodeDestination,
-        origin_pubkey: CommsPublicKey,
-        origin_signature: Vec<u8>,
-        message_type: DhtMessageType,
-        flags: DhtMessageFlags,
-    ) -> Self
-    {
-        Self {
-            version: DHT_ENVELOPE_HEADER_VERSION,
-            destination: destination.into(),
-            origin_public_key: origin_pubkey,
-            origin_signature,
-            message_type,
-            flags,
+    pub fn is_valid(&self) -> bool {
+        if self.flags.contains(DhtMessageFlags::ENCRYPTED) {
+            !self.origin_mac.is_empty() && self.ephemeral_public_key.is_some()
+        } else {
+            true
         }
     }
 }
 
-impl fmt::Debug for DhtMessageHeader {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("DhtHeader")
-            .field("version", &self.version)
-            .field("destination", &self.destination)
-            .field("origin_public_key", &self.origin_public_key.to_hex())
-            .field("origin_signature", &self.origin_signature.to_hex())
-            .field("message_type", &self.message_type)
-            .field("flags", &self.flags)
-            .finish()
+impl Display for DhtMessageHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "DhtMessageHeader (Dest:{}, Type:{:?}, Network:{:?}, Flags:{:?}, Trace:{})",
+            self.destination, self.message_type, self.network, self.flags, self.message_tag
+        )
     }
 }
 
@@ -119,19 +145,33 @@ impl TryFrom<DhtHeader> for DhtMessageHeader {
     type Error = DhtMessageError;
 
     fn try_from(header: DhtHeader) -> Result<Self, Self::Error> {
-        Ok(Self::new(
-            header
-                .destination
-                .map(|destination| destination.try_into().ok())
-                .filter(Option::is_some)
-                .map(Option::unwrap)
-                .ok_or(DhtMessageError::InvalidDestination)?,
-            CommsPublicKey::from_bytes(&header.origin_public_key)
-                .map_err(|_| DhtMessageError::InvalidOriginPublicKey)?,
-            header.origin_signature,
-            DhtMessageType::from_i32(header.message_type).ok_or(DhtMessageError::InvalidMessageType)?,
-            DhtMessageFlags::from_bits(header.flags).ok_or(DhtMessageError::InvalidMessageFlags)?,
-        ))
+        let destination = header
+            .destination
+            .map(|destination| destination.try_into().ok())
+            .filter(Option::is_some)
+            .map(Option::unwrap)
+            .ok_or_else(|| DhtMessageError::InvalidDestination)?;
+
+        let ephemeral_public_key = if header.ephemeral_public_key.is_empty() {
+            None
+        } else {
+            Some(
+                CommsPublicKey::from_bytes(&header.ephemeral_public_key)
+                    .map_err(|_| DhtMessageError::InvalidEphemeralPublicKey)?,
+            )
+        };
+
+        Ok(Self {
+            version: header.version,
+            destination,
+            origin_mac: header.origin_mac,
+            ephemeral_public_key,
+            message_type: DhtMessageType::from_i32(header.message_type)
+                .ok_or_else(|| DhtMessageError::InvalidMessageType)?,
+            network: Network::from_i32(header.network).ok_or_else(|| DhtMessageError::InvalidNetwork)?,
+            flags: DhtMessageFlags::from_bits(header.flags).ok_or_else(|| DhtMessageError::InvalidMessageFlags)?,
+            message_tag: MessageTag::from(header.message_tag),
+        })
     }
 }
 
@@ -150,39 +190,27 @@ impl From<DhtMessageHeader> for DhtHeader {
     fn from(header: DhtMessageHeader) -> Self {
         Self {
             version: header.version,
-            origin_public_key: header.origin_public_key.to_vec(),
-            origin_signature: header.origin_signature,
+            ephemeral_public_key: header
+                .ephemeral_public_key
+                .as_ref()
+                .map(ByteArray::to_vec)
+                .unwrap_or_else(Vec::new),
+            origin_mac: header.origin_mac,
             destination: Some(header.destination.into()),
             message_type: header.message_type as i32,
+            network: header.network as i32,
             flags: header.flags.bits(),
+            message_tag: header.message_tag.as_value(),
         }
     }
 }
 
 impl DhtEnvelope {
-    pub fn new(header: DhtHeader, body: Vec<u8>) -> Self {
+    pub fn new(header: DhtHeader, body: Bytes) -> Self {
         Self {
             header: Some(header),
-            body,
+            body: body.to_vec(),
         }
-    }
-
-    pub fn is_signature_valid(&self) -> bool {
-        self.header
-            .as_ref()
-            .and_then(|header| {
-                CommsPublicKey::from_bytes(&header.origin_public_key)
-                    .map(|pk| (pk, &header.origin_signature))
-                    .ok()
-            })
-            .map(|(origin_public_key, origin_signature)| {
-                match signature::verify(&origin_public_key, origin_signature, &self.body) {
-                    Ok(is_valid) => is_valid,
-                    // error means that the signature could not deserialize, so is invalid
-                    Err(_) => false,
-                }
-            })
-            .unwrap_or(false)
     }
 }
 
@@ -193,9 +221,9 @@ pub enum NodeDestination {
     /// the peer being sent to.
     Unknown,
     /// Destined for a particular public key
-    PublicKey(CommsPublicKey),
+    PublicKey(Box<CommsPublicKey>),
     /// Destined for a particular node id, or network region
-    NodeId(NodeId),
+    NodeId(Box<NodeId>),
 }
 
 impl NodeDestination {
@@ -205,6 +233,41 @@ impl NodeDestination {
             NodeDestination::PublicKey(pk) => pk.to_vec(),
             NodeDestination::NodeId(node_id) => node_id.to_vec(),
         }
+    }
+
+    pub fn public_key(&self) -> Option<&CommsPublicKey> {
+        match self {
+            NodeDestination::Unknown => None,
+            NodeDestination::PublicKey(pk) => Some(pk),
+            NodeDestination::NodeId(_) => None,
+        }
+    }
+
+    pub fn node_id(&self) -> Option<&NodeId> {
+        match self {
+            NodeDestination::Unknown => None,
+            NodeDestination::PublicKey(_) => None,
+            NodeDestination::NodeId(node_id) => Some(node_id),
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        match self {
+            NodeDestination::Unknown => true,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<&CommsPublicKey> for NodeDestination {
+    fn eq(&self, other: &&CommsPublicKey) -> bool {
+        self.public_key().map(|pk| pk == *other).unwrap_or(false)
+    }
+}
+
+impl PartialEq<&NodeId> for NodeDestination {
+    fn eq(&self, other: &&NodeId) -> bool {
+        self.node_id().map(|node_id| node_id == *other).unwrap_or(false)
     }
 }
 
@@ -231,12 +294,24 @@ impl TryFrom<Destination> for NodeDestination {
         match destination {
             Destination::Unknown(_) => Ok(NodeDestination::Unknown),
             Destination::PublicKey(pk) => {
-                CommsPublicKey::from_bytes(&pk).and_then(|pk| Ok(NodeDestination::PublicKey(pk)))
+                CommsPublicKey::from_bytes(&pk).and_then(|pk| Ok(NodeDestination::PublicKey(Box::new(pk))))
             },
             Destination::NodeId(node_id) => {
-                NodeId::from_bytes(&node_id).and_then(|node_id| Ok(NodeDestination::NodeId(node_id)))
+                NodeId::from_bytes(&node_id).and_then(|node_id| Ok(NodeDestination::NodeId(Box::new(node_id))))
             },
         }
+    }
+}
+
+impl From<CommsPublicKey> for NodeDestination {
+    fn from(pk: CommsPublicKey) -> Self {
+        NodeDestination::PublicKey(Box::new(pk))
+    }
+}
+
+impl From<NodeId> for NodeDestination {
+    fn from(node_id: NodeId) -> Self {
+        NodeDestination::NodeId(Box::new(node_id))
     }
 }
 

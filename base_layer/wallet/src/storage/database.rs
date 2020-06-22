@@ -22,32 +22,42 @@
 
 use crate::error::WalletStorageError;
 use log::*;
-use std::fmt::{Display, Error, Formatter};
-use tari_comms::{peer_manager::Peer, types::CommsPublicKey};
+use std::{
+    fmt::{Display, Error, Formatter},
+    sync::Arc,
+};
+use tari_comms::{
+    peer_manager::Peer,
+    types::{CommsPublicKey, CommsSecretKey},
+};
 
-const LOG_TARGET: &'static str = "wallet::contacts_service::database";
+const LOG_TARGET: &str = "wallet::database";
 
 /// This trait defines the functionality that a database backend need to provide for the Contacts Service
 pub trait WalletBackend: Send + Sync {
     /// Retrieve the record associated with the provided DbKey
     fn fetch(&self, key: &DbKey) -> Result<Option<DbValue>, WalletStorageError>;
     /// Modify the state the of the backend with a write operation
-    fn write(&mut self, op: WriteOperation) -> Result<Option<DbValue>, WalletStorageError>;
+    fn write(&self, op: WriteOperation) -> Result<Option<DbValue>, WalletStorageError>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DbKey {
     Peer(CommsPublicKey),
     Peers,
+    CommsSecretKey,
 }
 
 pub enum DbValue {
     Peer(Box<Peer>),
     Peers(Vec<Peer>),
+    CommsSecretKey(CommsSecretKey),
 }
 
+#[derive(Clone)]
 pub enum DbKeyValuePair {
     Peer(CommsPublicKey, Peer),
+    CommsSecretKey(CommsSecretKey),
 }
 
 pub enum WriteOperation {
@@ -57,9 +67,9 @@ pub enum WriteOperation {
 
 // Private macro that pulls out all the boiler plate of extracting a DB query result from its variants
 macro_rules! fetch {
-    ($self:ident, $key_val:expr, $key_var:ident) => {{
+    ($db:ident, $key_val:expr, $key_var:ident) => {{
         let key = DbKey::$key_var($key_val);
-        match $self.db.fetch(&key) {
+        match $db.fetch(&key) {
             Ok(None) => Err(WalletStorageError::ValueNotFound(key)),
             Ok(Some(DbValue::$key_var(k))) => Ok(*k),
             Ok(Some(other)) => unexpected_result(key, other),
@@ -69,24 +79,31 @@ macro_rules! fetch {
 }
 
 pub struct WalletDatabase<T>
-where T: WalletBackend
+where T: WalletBackend + 'static
 {
-    db: T,
+    db: Arc<T>,
 }
 
 impl<T> WalletDatabase<T>
-where T: WalletBackend
+where T: WalletBackend + 'static
 {
     pub fn new(db: T) -> Self {
-        Self { db }
+        Self { db: Arc::new(db) }
     }
 
-    pub fn get_peer(&self, pub_key: &CommsPublicKey) -> Result<Peer, WalletStorageError> {
-        fetch!(self, pub_key.clone(), Peer)
+    pub async fn get_peer(&self, pub_key: CommsPublicKey) -> Result<Peer, WalletStorageError> {
+        let db_clone = self.db.clone();
+
+        tokio::task::spawn_blocking(move || fetch!(db_clone, pub_key.clone(), Peer))
+            .await
+            .or_else(|err| Err(WalletStorageError::BlockingTaskSpawnError(err.to_string())))
+            .and_then(|inner_result| inner_result)
     }
 
-    pub fn get_peers(&self) -> Result<Vec<Peer>, WalletStorageError> {
-        let c = match self.db.fetch(&DbKey::Peers) {
+    pub async fn get_peers(&self) -> Result<Vec<Peer>, WalletStorageError> {
+        let db_clone = self.db.clone();
+
+        let c = tokio::task::spawn_blocking(move || match db_clone.fetch(&DbKey::Peers) {
             Ok(None) => log_error(
                 DbKey::Peers,
                 WalletStorageError::UnexpectedResult("Could not retrieve peers".to_string()),
@@ -94,29 +111,68 @@ where T: WalletBackend
             Ok(Some(DbValue::Peers(c))) => Ok(c),
             Ok(Some(other)) => unexpected_result(DbKey::Peers, other),
             Err(e) => log_error(DbKey::Peers, e),
-        }?;
+        })
+        .await
+        .map_err(|err| WalletStorageError::BlockingTaskSpawnError(err.to_string()))??;
         Ok(c)
     }
 
-    pub fn save_peer(&mut self, peer: Peer) -> Result<(), WalletStorageError> {
-        self.db.write(WriteOperation::Insert(DbKeyValuePair::Peer(
-            peer.public_key.clone(),
-            peer,
-        )))?;
+    pub async fn save_peer(&self, peer: Peer) -> Result<(), WalletStorageError> {
+        let db_clone = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            db_clone.write(WriteOperation::Insert(DbKeyValuePair::Peer(
+                peer.public_key.clone(),
+                peer,
+            )))
+        })
+        .await
+        .map_err(|err| WalletStorageError::BlockingTaskSpawnError(err.to_string()))??;
         Ok(())
     }
 
-    pub fn remove_peer(&mut self, pub_key: &CommsPublicKey) -> Result<Peer, WalletStorageError> {
-        match self
-            .db
-            .write(WriteOperation::Remove(DbKey::Peer(pub_key.clone())))?
-            .ok_or(WalletStorageError::ValueNotFound(DbKey::Peer(pub_key.clone())))?
-        {
-            DbValue::Peer(c) => Ok(*c),
-            DbValue::Peers(_) => Err(WalletStorageError::UnexpectedResult(
-                "Incorrect response from backend.".to_string(),
-            )),
-        }
+    pub async fn remove_peer(&self, pub_key: CommsPublicKey) -> Result<Peer, WalletStorageError> {
+        let db_clone = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            match db_clone
+                .write(WriteOperation::Remove(DbKey::Peer(pub_key.clone())))?
+                .ok_or_else(|| WalletStorageError::ValueNotFound(DbKey::Peer(pub_key.clone())))?
+            {
+                DbValue::Peer(c) => Ok(*c),
+                _ => Err(WalletStorageError::UnexpectedResult(
+                    "Incorrect response from backend.".to_string(),
+                )),
+            }
+        })
+        .await
+        .map_err(|err| WalletStorageError::BlockingTaskSpawnError(err.to_string()))
+        .and_then(|inner_result| inner_result)
+    }
+
+    pub async fn get_comms_secret_key(&self) -> Result<Option<CommsSecretKey>, WalletStorageError> {
+        let db_clone = self.db.clone();
+
+        let c = tokio::task::spawn_blocking(move || match db_clone.fetch(&DbKey::CommsSecretKey) {
+            Ok(None) => Ok(None),
+            Ok(Some(DbValue::CommsSecretKey(k))) => Ok(Some(k)),
+            Ok(Some(other)) => unexpected_result(DbKey::CommsSecretKey, other),
+            Err(e) => log_error(DbKey::CommsSecretKey, e),
+        })
+        .await
+        .map_err(|err| WalletStorageError::BlockingTaskSpawnError(err.to_string()))??;
+        Ok(c)
+    }
+
+    pub async fn set_comms_private_key(&self, key: CommsSecretKey) -> Result<(), WalletStorageError> {
+        let db_clone = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            db_clone.write(WriteOperation::Insert(DbKeyValuePair::CommsSecretKey(key)))
+        })
+        .await
+        .map_err(|err| WalletStorageError::BlockingTaskSpawnError(err.to_string()))??;
+        Ok(())
     }
 }
 
@@ -130,7 +186,8 @@ impl Display for DbKey {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
         match self {
             DbKey::Peer(c) => f.write_str(&format!("Peer: {:?}", c)),
-            DbKey::Peers => f.write_str(&format!("Peers")),
+            DbKey::Peers => f.write_str(&"Peers".to_string()),
+            DbKey::CommsSecretKey => f.write_str(&"CommsSecretKey".to_string()),
         }
     }
 }
@@ -138,8 +195,9 @@ impl Display for DbKey {
 impl Display for DbValue {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
         match self {
-            DbValue::Peer(_) => f.write_str(&format!("Peer")),
-            DbValue::Peers(_) => f.write_str(&format!("Peers")),
+            DbValue::Peer(p) => f.write_str(&format!("Peer: {:?}", p)),
+            DbValue::Peers(_) => f.write_str(&"Peers".to_string()),
+            DbValue::CommsSecretKey(k) => f.write_str(&format!("CommsSecretKey: {:?}", k)),
         }
     }
 }
@@ -159,68 +217,99 @@ mod test {
     use crate::{
         error::WalletStorageError,
         storage::{
-            database::{DbKey, WalletDatabase},
+            connection_manager::run_migration_and_create_sqlite_connection,
+            database::{DbKey, WalletBackend, WalletDatabase},
             memory_db::WalletMemoryDatabase,
+            sqlite_db::WalletSqliteDatabase,
         },
     };
+    use rand::rngs::OsRng;
     use tari_comms::{
-        connection::{net_address::NetAddressWithStats, NetAddressesWithStats},
+        multiaddr::Multiaddr,
         peer_manager::{NodeId, Peer, PeerFeatures, PeerFlags},
         types::{CommsPublicKey, CommsSecretKey},
     };
-    use tari_crypto::keys::PublicKey;
+    use tari_core::transactions::types::PublicKey;
+    use tari_crypto::keys::{PublicKey as PublicKeyTrait, SecretKey};
+    use tari_test_utils::random::string;
+    use tempdir::TempDir;
+    use tokio::runtime::Runtime;
 
-    #[test]
-    pub fn test_database_crud() {
-        let mut rng = match rand::OsRng::new() {
-            Ok(x) => x,
-            Err(_) => unimplemented!(),
-        };
+    pub fn test_database_crud<T: WalletBackend + 'static>(backend: T) {
+        let mut runtime = Runtime::new().unwrap();
 
-        let mut db = WalletDatabase::new(WalletMemoryDatabase::new());
+        let db = WalletDatabase::new(backend);
         let mut peers = Vec::new();
         for i in 0..5 {
-            let (_secret_key, public_key): (CommsSecretKey, CommsPublicKey) = PublicKey::random_keypair(&mut rng);
+            let (_secret_key, public_key): (CommsSecretKey, CommsPublicKey) = PublicKey::random_keypair(&mut OsRng);
 
             let peer = Peer::new(
                 public_key.clone(),
                 NodeId::from_key(&public_key).unwrap(),
-                NetAddressesWithStats::new(vec![NetAddressWithStats::new("1.2.3.4:9000".parse().unwrap())]),
+                "/ip4/1.2.3.4/tcp/9000".parse::<Multiaddr>().unwrap().into(),
                 PeerFlags::empty(),
                 PeerFeatures::COMMUNICATION_NODE,
+                &[],
             );
 
             peers.push(peer);
 
-            db.save_peer(peers[i].clone()).unwrap();
-            assert_eq!(
-                db.save_peer(peers[i].clone()),
-                Err(WalletStorageError::DuplicateContact)
-            );
+            runtime.block_on(db.save_peer(peers[i].clone())).unwrap();
+
+            match runtime.block_on(db.save_peer(peers[i].clone())) {
+                Err(WalletStorageError::DuplicateContact) => (),
+                _ => assert!(false),
+            }
         }
 
-        let got_peers = db.get_peers().unwrap();
+        let got_peers = runtime.block_on(db.get_peers()).unwrap();
         assert_eq!(peers, got_peers);
 
-        let peer = db.get_peer(&peers[0].public_key).unwrap();
+        let peer = runtime.block_on(db.get_peer(peers[0].public_key.clone())).unwrap();
         assert_eq!(peer, peers[0]);
 
-        let (_secret_key, public_key) = PublicKey::random_keypair(&mut rng);
+        let (_secret_key, public_key): (_, PublicKey) = PublicKeyTrait::random_keypair(&mut OsRng);
 
-        let peer = db.get_peer(&public_key);
-        assert_eq!(
-            peer,
-            Err(WalletStorageError::ValueNotFound(DbKey::Peer(public_key.clone())))
-        );
-        assert_eq!(
-            db.remove_peer(&public_key),
-            Err(WalletStorageError::ValueNotFound(DbKey::Peer(public_key.clone())))
-        );
+        match runtime.block_on(db.get_peer(public_key.clone())) {
+            Err(WalletStorageError::ValueNotFound(DbKey::Peer(_p))) => (),
+            _ => assert!(false),
+        }
 
-        let _ = db.remove_peer(&peers[0].public_key).unwrap();
+        match runtime.block_on(db.remove_peer(public_key.clone())) {
+            Err(WalletStorageError::ValueNotFound(DbKey::Peer(_p))) => (),
+            _ => assert!(false),
+        }
+
+        let _ = runtime.block_on(db.remove_peer(peers[0].public_key.clone())).unwrap();
         peers.remove(0);
-        let got_peers = db.get_peers().unwrap();
+        let got_peers = runtime.block_on(db.get_peers()).unwrap();
 
         assert_eq!(peers, got_peers);
+
+        // Test wallet settings
+        assert!(runtime.block_on(db.get_comms_secret_key()).unwrap().is_none());
+        let secret_key = CommsSecretKey::random(&mut OsRng);
+        runtime.block_on(db.set_comms_private_key(secret_key.clone())).unwrap();
+        let stored_key = runtime.block_on(db.get_comms_secret_key()).unwrap().unwrap();
+        assert_eq!(secret_key, stored_key);
+    }
+
+    #[test]
+    fn test_database_crud_memory_db() {
+        test_database_crud(WalletMemoryDatabase::new());
+    }
+
+    #[test]
+    fn test_database_crud_sqlite_db() {
+        let db_name = format!("{}.sqlite3", string(8).as_str());
+        let db_folder = TempDir::new(string(8).as_str())
+            .unwrap()
+            .path()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let connection = run_migration_and_create_sqlite_connection(&format!("{}{}", db_folder, db_name)).unwrap();
+
+        test_database_crud(WalletSqliteDatabase::new(connection));
     }
 }

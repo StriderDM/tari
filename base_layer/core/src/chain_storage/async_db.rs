@@ -21,9 +21,9 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
-    blocks::{Block, BlockHeader},
+    blocks::{Block, BlockHash, BlockHeader, NewBlockTemplate},
     chain_storage::{
-        blockchain_database::{BlockAddResult, MutableMmrState},
+        blockchain_database::BlockAddResult,
         metadata::ChainMetadata,
         BlockchainBackend,
         BlockchainDatabase,
@@ -31,139 +31,84 @@ use crate::{
         HistoricalBlock,
         MmrTree,
     },
+    transactions::{
+        transaction::{TransactionKernel, TransactionOutput},
+        types::HashOutput,
+    },
 };
-use futures::future::poll_fn;
-use std::task::Poll;
+use log::*;
+use rand::{rngs::OsRng, RngCore};
+use std::time::Instant;
 use tari_mmr::MerkleProof;
-use tari_transactions::{
-    transaction::{TransactionKernel, TransactionOutput},
-    types::HashOutput,
-};
-use tokio_executor::threadpool::blocking;
+
+const LOG_TARGET: &str = "c::bn::async_db";
+
+fn trace_log<F, R>(name: &str, f: F) -> R
+where F: FnOnce() -> R {
+    let start = Instant::now();
+    let trace_id = OsRng.next_u32();
+    trace!(
+        target: LOG_TARGET,
+        "[{}] Entered blocking thread. trace_id: '{}'",
+        name,
+        trace_id
+    );
+    let ret = f();
+    trace!(
+        target: LOG_TARGET,
+        "[{}] Exited blocking thread after {}ms. trace_id: '{}'",
+        name,
+        start.elapsed().as_millis(),
+        trace_id
+    );
+    ret
+}
 
 macro_rules! make_async {
-    ($fn:ident() -> $rtype:ty) => {
+    ($fn:ident() -> $rtype:ty, $name:expr) => {
         pub async fn $fn<T>(db: BlockchainDatabase<T>) -> Result<$rtype, ChainStorageError>
-        where T: BlockchainBackend {
-            poll_fn(move |_| {
-                let db = db.clone();
-                match blocking(move || db.$fn()) {
-                    Poll::Pending => Poll::Pending,
-                    // Map BlockingError -> ChainStorageError
-                    Poll::Ready(Err(e)) => Poll::Ready(Err(ChainStorageError::AccessError(format!(
-                        "Could not find a blocking thread to execute DB query. {}",
-                        e.to_string()
-                    )))),
-                    // Unwrap and lift ChainStorageError
-                    Poll::Ready(Ok(Err(e))) => Poll::Ready(Err(e)),
-                    // Unwrap and return result
-                    Poll::Ready(Ok(Ok(v))) => Poll::Ready(Ok(v)),
-                }
+        where T: BlockchainBackend + 'static {
+            tokio::task::spawn_blocking(move || {
+                trace_log($name, move || db.$fn())
             })
             .await
+            .or_else(|err| Err(ChainStorageError::BlockingTaskSpawnError(err.to_string())))
+            .and_then(|inner_result| inner_result)
         }
     };
 
-    ($fn:ident($param:ident:$ptype:ty) -> $rtype:ty) => {
-        pub async fn $fn<T>(db: BlockchainDatabase<T>, $param: $ptype) -> Result<$rtype, ChainStorageError>
-        where T: BlockchainBackend {
-            poll_fn(move |_| {
-                let db = db.clone();
-                let hash = $param.clone();
-                match blocking(move || db.$fn(hash)) {
-                    Poll::Pending => Poll::Pending,
-                    // Map BlockingError -> ChainStorageError
-                    Poll::Ready(Err(e)) => Poll::Ready(Err(ChainStorageError::AccessError(format!(
-                        "Could not find a blocking thread to execute DB query. {}",
-                        e.to_string()
-                    )))),
-                    // Unwrap and lift ChainStorageError
-                    Poll::Ready(Ok(Err(e))) => Poll::Ready(Err(e)),
-                    // Unwrap and return result
-                    Poll::Ready(Ok(Ok(v))) => Poll::Ready(Ok(v)),
-                }
+    ($fn:ident($($param:ident:$ptype:ty),+) -> $rtype:ty, $name:expr) => {
+        pub async fn $fn<T>(db: BlockchainDatabase<T>, $($param: $ptype),+) -> Result<$rtype, ChainStorageError>
+        where T: BlockchainBackend + 'static {
+            tokio::task::spawn_blocking(move || {
+                trace_log($name, move || db.$fn($($param),+))
             })
-            .await
-        }
-    };
-
-    ($fn:ident($param1:ident:$ptype1:ty,$param2:ident:$ptype2:ty) -> $rtype:ty) => {
-        pub async fn $fn<T>(
-            db: BlockchainDatabase<T>,
-            $param1: $ptype1,
-            $param2: $ptype2,
-        ) -> Result<$rtype, ChainStorageError>
-        where
-            T: BlockchainBackend,
-        {
-            poll_fn(move |_| {
-                let db = db.clone();
-                let p1 = $param1.clone();
-                let p2 = $param2.clone();
-                match blocking(move || db.$fn(p1, p2)) {
-                    Poll::Pending => Poll::Pending,
-                    // Map BlockingError -> ChainStorageError
-                    Poll::Ready(Err(e)) => Poll::Ready(Err(ChainStorageError::AccessError(format!(
-                        "Could not find a blocking thread to execute DB query. {}",
-                        e.to_string()
-                    )))),
-                    // Unwrap and lift ChainStorageError
-                    Poll::Ready(Ok(Err(e))) => Poll::Ready(Err(e)),
-                    // Unwrap and return result
-                    Poll::Ready(Ok(Ok(v))) => Poll::Ready(Ok(v)),
-                }
-            })
-            .await
-        }
-    };
-
-    ($fn:ident($param1:ident:$ptype1:ty,$param2:ident:$ptype2:ty,$param3:ident:$ptype3:ty) -> $rtype:ty) => {
-        pub async fn $fn<T>(
-            db: BlockchainDatabase<T>,
-            $param1: $ptype1,
-            $param2: $ptype2,
-            $param3: $ptype3,
-        ) -> Result<$rtype, ChainStorageError>
-        where
-            T: BlockchainBackend,
-        {
-            poll_fn(move |_| {
-                let db = db.clone();
-                let p1 = $param1.clone();
-                let p2 = $param2.clone();
-                let p3 = $param3.clone();
-                match blocking(move || db.$fn(p1, p2, p3)) {
-                    Poll::Pending => Poll::Pending,
-                    // Map BlockingError -> ChainStorageError
-                    Poll::Ready(Err(e)) => Poll::Ready(Err(ChainStorageError::AccessError(format!(
-                        "Could not find a blocking thread to execute DB query. {}",
-                        e.to_string()
-                    )))),
-                    // Unwrap and lift ChainStorageError
-                    Poll::Ready(Ok(Err(e))) => Poll::Ready(Err(e)),
-                    // Unwrap and return result
-                    Poll::Ready(Ok(Ok(v))) => Poll::Ready(Ok(v)),
-                }
-            })
-            .await
+                .await
+                .or_else(|err| Err(ChainStorageError::BlockingTaskSpawnError(err.to_string())))
+                .and_then(|inner_result| inner_result)
         }
     };
 }
 
-make_async!(get_metadata() -> ChainMetadata);
-make_async!(fetch_kernel(hash: HashOutput) -> TransactionKernel);
-make_async!(fetch_header_with_block_hash(hash: HashOutput) -> BlockHeader);
-make_async!(fetch_header(block_num: u64) -> BlockHeader);
-make_async!(fetch_utxo(hash: HashOutput) -> TransactionOutput);
-make_async!(fetch_stxo(hash: HashOutput) -> TransactionOutput);
-make_async!(fetch_orphan(hash: HashOutput) -> Block);
-make_async!(is_utxo(hash: HashOutput) -> bool);
-make_async!(fetch_mmr_root(tree: MmrTree) -> HashOutput);
-make_async!(fetch_mmr_only_root(tree: MmrTree) -> HashOutput);
-make_async!(fetch_mmr_base_leaf_nodes(tree: MmrTree,index: usize, count:usize) -> MutableMmrState);
-make_async!(add_block(block: Block) -> BlockAddResult);
-make_async!(add_new_block(block: Block) -> BlockAddResult);
-// make_async!(is_new_best_block(block: &Block) -> bool);
-make_async!(fetch_block(height: u64) -> HistoricalBlock);
-make_async!(rewind_to_height(height: u64) -> ());
-make_async!(fetch_mmr_proof(tree: MmrTree, pos: usize) -> MerkleProof);
+make_async!(get_metadata() -> ChainMetadata, "get_metadata");
+make_async!(fetch_kernel(hash: HashOutput) -> TransactionKernel, "fetch_kernel");
+make_async!(fetch_header_with_block_hash(hash: HashOutput) -> BlockHeader, "fetch_header_with_block_hash");
+make_async!(fetch_header(block_num: u64) -> BlockHeader, "fetch_header");
+make_async!(fetch_utxo(hash: HashOutput) -> TransactionOutput, "fetch_utxo");
+make_async!(fetch_stxo(hash: HashOutput) -> TransactionOutput, "fetch_stxo");
+make_async!(fetch_orphan(hash: HashOutput) -> Block, "fetch_orphan");
+make_async!(is_utxo(hash: HashOutput) -> bool, "is_utxo");
+make_async!(is_stxo(hash: HashOutput) -> bool, "is_stxo");
+make_async!(fetch_mmr_root(tree: MmrTree) -> HashOutput, "fetch_mmr_root");
+make_async!(fetch_mmr_only_root(tree: MmrTree) -> HashOutput, "fetch_mmr_only_root");
+make_async!(calculate_mmr_root(tree: MmrTree,additions: Vec<HashOutput>,deletions: Vec<HashOutput>) -> HashOutput, "calculate_mmr_root");
+make_async!(fetch_mmr_node_count(tree: MmrTree, height: u64) -> u32, "fetch_mmr_node_count");
+make_async!(fetch_mmr_nodes(tree: MmrTree, pos: u32, count: u32) -> Vec<(Vec<u8>, bool)>, "fetch_mmr_nodes");
+make_async!(add_block(block: Block) -> BlockAddResult, "add_block");
+make_async!(calculate_mmr_roots(template: NewBlockTemplate) -> Block, "calculate_mmr_roots");
+
+make_async!(fetch_block(height: u64) -> HistoricalBlock, "fetch_block");
+make_async!(fetch_block_with_hash(hash: HashOutput) -> Option<HistoricalBlock>, "fetch_block_with_hash");
+make_async!(block_exists(block_hash: BlockHash) -> bool, "block_exists");
+make_async!(rewind_to_height(height: u64) -> Vec<Block>, "rewind_to_height");
+make_async!(fetch_mmr_proof(tree: MmrTree, pos: usize) -> MerkleProof, "fetch_mmr_proof");

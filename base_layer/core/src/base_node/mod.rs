@@ -32,17 +32,28 @@
 //! More details about the implementation are presented in
 //! [RFC-0111](https://rfc.tari.com/RFC-0111_BaseNodeArchitecture.html).
 
-mod backoff;
-mod base_node;
-mod comms_interface;
-mod proto;
-#[cfg(test)]
-mod test;
-
+#[cfg(feature = "base_node")]
+pub mod chain_metadata_service;
+#[cfg(feature = "base_node")]
+pub mod comms_interface;
+#[cfg(feature = "base_node")]
+pub mod consts;
+#[cfg(feature = "base_node")]
 pub mod service;
+#[cfg(feature = "base_node")]
+mod state_machine;
+#[cfg(feature = "base_node")]
 pub mod states;
-
 // Public re-exports
-pub use backoff::BackOff;
-pub use base_node::BaseNodeStateMachine;
-pub use comms_interface::OutboundNodeCommsInterface;
+#[cfg(feature = "base_node")]
+pub use comms_interface::{LocalNodeCommsInterface, OutboundNodeCommsInterface};
+#[cfg(feature = "base_node")]
+pub use state_machine::{BaseNodeStateMachine, BaseNodeStateMachineConfig};
+
+#[cfg(any(feature = "base_node", feature = "base_node_proto"))]
+pub mod proto;
+
+#[cfg(any(feature = "base_node", feature = "base_node_proto", feature = "mempool_proto"))]
+mod waiting_requests;
+#[cfg(any(feature = "base_node", feature = "base_node_proto", feature = "mempool_proto"))]
+pub use waiting_requests::{generate_request_key, RequestKey, WaitingRequests};

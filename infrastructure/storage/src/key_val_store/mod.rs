@@ -22,9 +22,10 @@
 
 pub mod error;
 pub mod hmap_database;
+#[allow(clippy::module_inception)]
 pub mod key_val_store;
 pub mod lmdb_database;
 
 pub use error::KeyValStoreError;
-pub use hmap_database::HMapDatabase;
+pub use hmap_database::HashmapDatabase;
 pub use key_val_store::KeyValueStore;

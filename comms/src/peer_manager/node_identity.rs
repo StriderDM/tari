@@ -22,7 +22,6 @@
 
 use super::node_id::deserialize_node_id_from_hex;
 use crate::{
-    connection::NetAddress,
     peer_manager::{
         node_id::{NodeId, NodeIdError},
         Peer,
@@ -31,28 +30,24 @@ use crate::{
     },
     types::{CommsPublicKey, CommsSecretKey},
 };
-use derive_error::Error;
+use multiaddr::Multiaddr;
 use rand::{CryptoRng, Rng};
 use serde::{Deserialize, Serialize};
-use std::sync::RwLock;
-use tari_crypto::keys::{PublicKey, SecretKey};
-use tari_utilities::hex::serialize_to_hex;
+use std::{fmt, sync::RwLock};
+use tari_crypto::{
+    keys::{PublicKey, SecretKey},
+    tari_utilities::hex::serialize_to_hex,
+};
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum NodeIdentityError {
-    NodeIdError(NodeIdError),
-    /// The Thread Safety has been breached and the data access has become poisoned
-    PoisonedAccess,
+    #[error("NodeIdError: {0}")]
+    NodeIdError(#[from] NodeIdError),
 }
 
-/// Identity of this node
-/// # Fields
-/// `identity`: The public identity fields for this node
-///
-/// `secret_key`: The secret key corresponding to the public key of this node
-///
-/// `control_service_address`: The NetAddress of the local node's Control port
-#[derive(Serialize, Deserialize)]
+/// The public and private identity of this node on the network
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NodeIdentity {
     #[serde(serialize_with = "serialize_to_hex")]
     #[serde(deserialize_with = "deserialize_node_id_from_hex")]
@@ -60,14 +55,14 @@ pub struct NodeIdentity {
     public_key: CommsPublicKey,
     features: PeerFeatures,
     secret_key: CommsSecretKey,
-    control_service_address: RwLock<NetAddress>,
+    public_address: RwLock<Multiaddr>,
 }
 
 impl NodeIdentity {
     /// Create a new NodeIdentity from the provided key pair and control service address
     pub fn new(
         secret_key: CommsSecretKey,
-        control_service_address: NetAddress,
+        public_address: Multiaddr,
         features: PeerFeatures,
     ) -> Result<Self, NodeIdentityError>
     {
@@ -79,14 +74,14 @@ impl NodeIdentity {
             public_key,
             features,
             secret_key,
-            control_service_address: RwLock::new(control_service_address),
+            public_address: RwLock::new(public_address),
         })
     }
 
     /// Generates a new random NodeIdentity for CommsPublicKey
     pub fn random<R>(
         rng: &mut R,
-        control_service_address: NetAddress,
+        public_address: Multiaddr,
         features: PeerFeatures,
     ) -> Result<Self, NodeIdentityError>
     where
@@ -101,32 +96,27 @@ impl NodeIdentity {
             public_key,
             features,
             secret_key,
-            control_service_address: RwLock::new(control_service_address),
+            public_address: RwLock::new(public_address),
         })
     }
 
-    /// Retrieve the control_service_address
-    pub fn control_service_address(&self) -> NetAddress {
-        acquire_read_lock!(self.control_service_address).clone()
+    /// Retrieve the publicly accessible address that peers must connect to establish a connection
+    pub fn public_address(&self) -> Multiaddr {
+        acquire_read_lock!(self.public_address).clone()
     }
 
     /// Modify the control_service_address
-    pub fn set_control_service_address(&self, control_service_address: NetAddress) -> Result<(), NodeIdentityError> {
-        *self
-            .control_service_address
-            .write()
-            .map_err(|_| NodeIdentityError::PoisonedAccess)? = control_service_address;
-        Ok(())
+    pub fn set_public_address(&self, address: Multiaddr) {
+        *acquire_write_lock!(self.public_address) = address;
     }
 
-    /// This returns a random NodeIdentity for testing purposes. This function can panic. If a control_service_address
+    /// This returns a random NodeIdentity for testing purposes. This function can panic. If public_address
     /// is None, 127.0.0.1:9000 will be used (i.e. the caller doesn't care what the control_service_address is).
     #[cfg(test)]
-    pub fn random_for_test(control_service_address: Option<NetAddress>, features: PeerFeatures) -> Self {
-        use rand::OsRng;
+    pub fn random_for_test(public_address: Option<Multiaddr>, features: PeerFeatures) -> Self {
         Self::random(
-            &mut OsRng::new().unwrap(),
-            control_service_address.or("127.0.0.1:9000".parse().ok()).unwrap(),
+            &mut rand::rngs::OsRng,
+            public_address.or("/ip4/127.0.0.1/tcp/9000".parse().ok()).unwrap(),
             features,
         )
         .unwrap()
@@ -148,24 +138,25 @@ impl NodeIdentity {
     }
 
     #[inline]
-    pub fn features(&self) -> &PeerFeatures {
-        &self.features
+    pub fn features(&self) -> PeerFeatures {
+        self.features
     }
 
     #[inline]
     pub fn has_peer_features(&self, peer_features: PeerFeatures) -> bool {
         self.features().contains(peer_features)
     }
-}
 
-impl From<NodeIdentity> for Peer {
-    fn from(node_identity: NodeIdentity) -> Peer {
+    /// Returns a Peer with the same public key, node id, public address and features as represented in this
+    /// NodeIdentity. _NOTE: PeerFlags and supported_protocols are empty._
+    pub fn to_peer(&self) -> Peer {
         Peer::new(
-            node_identity.public_key,
-            node_identity.node_id,
-            node_identity.control_service_address.read().unwrap().clone().into(),
+            self.public_key().clone(),
+            self.node_id().clone(),
+            self.public_address().into(),
             PeerFlags::empty(),
-            node_identity.features,
+            self.features(),
+            &[],
         )
     }
 }
@@ -175,9 +166,20 @@ impl Clone for NodeIdentity {
         Self {
             node_id: self.node_id.clone(),
             public_key: self.public_key.clone(),
-            features: self.features.clone(),
+            features: self.features,
             secret_key: self.secret_key.clone(),
-            control_service_address: RwLock::new(self.control_service_address()),
+            public_address: RwLock::new(self.public_address()),
         }
+    }
+}
+
+impl fmt::Display for NodeIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Public Key: {}", self.public_key)?;
+        writeln!(f, "Node ID: {}", self.node_id)?;
+        writeln!(f, "Public Address: {}", acquire_read_lock!(self.public_address))?;
+        writeln!(f, "Features: {:?}", self.features)?;
+
+        Ok(())
     }
 }

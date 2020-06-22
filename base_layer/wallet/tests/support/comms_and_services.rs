@@ -20,90 +20,77 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::support::utils::random_string;
 use futures::Sink;
-use rand::rngs::OsRng;
 use std::{error::Error, sync::Arc, time::Duration};
 use tari_comms::{
-    builder::CommsNode,
-    connection::NetAddress,
-    control_service::ControlServiceConfig,
+    message::MessageTag,
+    multiaddr::Multiaddr,
     peer_manager::{NodeId, NodeIdentity, Peer, PeerFeatures, PeerFlags},
+    transports::MemoryTransport,
     types::CommsPublicKey,
+    CommsNode,
 };
-use tari_comms_dht::Dht;
-use tari_crypto::keys::PublicKey;
+use tari_comms_dht::{
+    envelope::{DhtMessageHeader, Network},
+    Dht,
+};
 use tari_p2p::{
     comms_connector::{InboundDomainConnector, PeerMessage},
     domain_message::DomainMessage,
-    initialization::{initialize_comms, CommsConfig},
+    initialization::initialize_local_test_comms,
 };
-use tempdir::TempDir;
-use tokio::runtime::TaskExecutor;
 
-pub fn setup_comms_services<TSink>(
-    executor: TaskExecutor,
+pub fn get_next_memory_address() -> Multiaddr {
+    let port = MemoryTransport::acquire_next_memsocket_port();
+    format!("/memory/{}", port).parse().unwrap()
+}
+
+pub async fn setup_comms_services<TSink>(
     node_identity: Arc<NodeIdentity>,
-    peers: Vec<NodeIdentity>,
+    peers: Vec<Arc<NodeIdentity>>,
     publisher: InboundDomainConnector<TSink>,
+    database_path: String,
+    discovery_request_timeout: Duration,
 ) -> (CommsNode, Dht)
 where
     TSink: Sink<Arc<PeerMessage>> + Clone + Unpin + Send + Sync + 'static,
     TSink::Error: Error + Send + Sync,
 {
-    let comms_config = CommsConfig {
-        node_identity: Arc::clone(&node_identity),
-        peer_connection_listening_address: "127.0.0.1".parse().unwrap(),
-        socks_proxy_address: None,
-        control_service: ControlServiceConfig {
-            listener_address: node_identity.control_service_address(),
-            socks_proxy_address: None,
-            requested_connection_timeout: Duration::from_millis(2000),
-        },
-        datastore_path: TempDir::new(random_string(8).as_str())
-            .unwrap()
-            .path()
-            .to_str()
-            .unwrap()
-            .to_string(),
-        establish_connection_timeout: Duration::from_secs(3),
-        peer_database_name: random_string(8),
-        inbound_buffer_size: 100,
-        outbound_buffer_size: 100,
-        dht: Default::default(),
-    };
-
-    let (comms, dht) = initialize_comms(executor, comms_config, publisher).unwrap();
-
-    for p in peers {
-        let addr = p.control_service_address();
-        comms
-            .peer_manager()
-            .add_peer(Peer::new(
-                p.public_key().clone(),
-                p.node_id().clone(),
-                addr.into(),
-                PeerFlags::empty(),
-                PeerFeatures::empty(),
-            ))
-            .unwrap();
-    }
+    let peers = peers.into_iter().map(|ni| ni.to_peer()).collect();
+    let (comms, dht) = initialize_local_test_comms(
+        node_identity,
+        publisher,
+        &database_path,
+        discovery_request_timeout,
+        peers,
+    )
+    .await
+    .unwrap();
 
     (comms, dht)
 }
 
-pub fn create_dummy_message<T>(inner: T) -> DomainMessage<T> {
-    let mut rng = OsRng::new().unwrap();
-    let (_, pk) = CommsPublicKey::random_keypair(&mut rng);
+pub fn create_dummy_message<T>(inner: T, public_key: &CommsPublicKey) -> DomainMessage<T> {
     let peer_source = Peer::new(
-        pk.clone(),
-        NodeId::from_key(&pk).unwrap(),
-        Vec::<NetAddress>::new().into(),
+        public_key.clone(),
+        NodeId::from_key(public_key).unwrap(),
+        Vec::<Multiaddr>::new().into(),
         PeerFlags::empty(),
         PeerFeatures::COMMUNICATION_NODE,
+        &[],
     );
     DomainMessage {
-        origin_pubkey: peer_source.public_key.clone(),
+        dht_header: DhtMessageHeader {
+            ephemeral_public_key: None,
+            origin_mac: Vec::new(),
+            version: Default::default(),
+            message_type: Default::default(),
+            flags: Default::default(),
+            network: Network::LocalTest,
+            destination: Default::default(),
+            message_tag: MessageTag::new(),
+        },
+        authenticated_origin: None,
         source_peer: peer_source,
         inner,
     }

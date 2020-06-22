@@ -1,40 +1,104 @@
 table! {
-    contacts (pub_key) {
-        pub_key -> Text,
-        screen_name -> Text,
-        address -> Text,
+    completed_transactions (tx_id) {
+        tx_id -> BigInt,
+        source_public_key -> Binary,
+        destination_public_key -> Binary,
+        amount -> BigInt,
+        fee -> BigInt,
+        transaction_protocol -> Text,
+        status -> Integer,
+        message -> Text,
+        timestamp -> Timestamp,
+        cancelled -> Integer,
     }
 }
 
 table! {
-    received_messages (id) {
-        id -> Binary,
-        source_pub_key -> Text,
-        dest_pub_key -> Text,
+    contacts (public_key) {
+        public_key -> Binary,
+        alias -> Text,
+    }
+}
+
+table! {
+    inbound_transactions (tx_id) {
+        tx_id -> BigInt,
+        source_public_key -> Binary,
+        amount -> BigInt,
+        receiver_protocol -> Text,
         message -> Text,
+        timestamp -> Timestamp,
+        cancelled -> Integer,
+        direct_send_success -> Integer,
+    }
+}
+
+table! {
+    key_manager_states (id) {
+        id -> Nullable<BigInt>,
+        master_seed -> Binary,
+        branch_seed -> Text,
+        primary_key_index -> BigInt,
         timestamp -> Timestamp,
     }
 }
 
 table! {
-    sent_messages (id) {
-        id -> Text,
-        source_pub_key -> Text,
-        dest_pub_key -> Text,
+    outbound_transactions (tx_id) {
+        tx_id -> BigInt,
+        destination_public_key -> Binary,
+        amount -> BigInt,
+        fee -> BigInt,
+        sender_protocol -> Text,
         message -> Text,
         timestamp -> Timestamp,
-        acknowledged -> Integer,
-        is_read -> Integer,
+        cancelled -> Integer,
+        direct_send_success -> Integer,
     }
 }
 
 table! {
-    settings (pub_key) {
-        pub_key -> Text,
-        screen_name -> Text,
+    outputs (spending_key) {
+        spending_key -> Binary,
+        value -> BigInt,
+        flags -> Integer,
+        maturity -> BigInt,
+        status -> Integer,
+        tx_id -> Nullable<BigInt>,
+        hash -> Nullable<Binary>,
     }
 }
 
-joinable!(sent_messages -> contacts (dest_pub_key));
+table! {
+    peers (public_key) {
+        public_key -> Binary,
+        peer -> Text,
+    }
+}
 
-allow_tables_to_appear_in_same_query!(contacts, received_messages, sent_messages, settings,);
+table! {
+    pending_transaction_outputs (tx_id) {
+        tx_id -> BigInt,
+        short_term -> Integer,
+        timestamp -> Timestamp,
+    }
+}
+
+table! {
+    wallet_settings (key) {
+        key -> Text,
+        value -> Text,
+    }
+}
+
+allow_tables_to_appear_in_same_query!(
+    completed_transactions,
+    contacts,
+    inbound_transactions,
+    key_manager_states,
+    outbound_transactions,
+    outputs,
+    peers,
+    pending_transaction_outputs,
+    wallet_settings,
+);

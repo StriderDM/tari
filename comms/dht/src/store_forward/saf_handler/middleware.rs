@@ -26,19 +26,21 @@ use crate::{
     config::DhtConfig,
     inbound::DecryptedDhtMessage,
     outbound::OutboundMessageRequester,
-    store_forward::SafStorage,
+    store_forward::StoreAndForwardRequester,
 };
-use futures::{task::Context, Future, Poll};
-use std::sync::Arc;
-use tari_comms::peer_manager::{NodeIdentity, PeerManager};
-use tari_comms_middleware::MiddlewareError;
+use futures::{task::Context, Future};
+use std::{sync::Arc, task::Poll};
+use tari_comms::{
+    peer_manager::{NodeIdentity, PeerManager},
+    pipeline::PipelineError,
+};
 use tower::Service;
 
 #[derive(Clone)]
 pub struct MessageHandlerMiddleware<S> {
     config: DhtConfig,
     next_service: S,
-    store: Arc<SafStorage>,
+    saf_requester: StoreAndForwardRequester,
     dht_requester: DhtRequester,
     peer_manager: Arc<PeerManager>,
     node_identity: Arc<NodeIdentity>,
@@ -49,7 +51,7 @@ impl<S> MessageHandlerMiddleware<S> {
     pub fn new(
         config: DhtConfig,
         next_service: S,
-        store: Arc<SafStorage>,
+        saf_requester: StoreAndForwardRequester,
         dht_requester: DhtRequester,
         node_identity: Arc<NodeIdentity>,
         peer_manager: Arc<PeerManager>,
@@ -58,7 +60,7 @@ impl<S> MessageHandlerMiddleware<S> {
     {
         Self {
             config,
-            store,
+            saf_requester,
             dht_requester,
             next_service,
             node_identity,
@@ -69,22 +71,22 @@ impl<S> MessageHandlerMiddleware<S> {
 }
 
 impl<S> Service<DecryptedDhtMessage> for MessageHandlerMiddleware<S>
-where S: Service<DecryptedDhtMessage, Response = (), Error = MiddlewareError> + Clone + Sync + Send
+where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError> + Clone + Sync + Send
 {
-    type Error = MiddlewareError;
+    type Error = PipelineError;
     type Response = ();
 
     type Future = impl Future<Output = Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.next_service.poll_ready(cx).map_err(Into::into)
+        self.next_service.poll_ready(cx)
     }
 
     fn call(&mut self, message: DecryptedDhtMessage) -> Self::Future {
         MessageHandlerTask::new(
             self.config.clone(),
             self.next_service.clone(),
-            Arc::clone(&self.store),
+            self.saf_requester.clone(),
             self.dht_requester.clone(),
             Arc::clone(&self.peer_manager),
             self.outbound_service.clone(),

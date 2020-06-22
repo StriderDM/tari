@@ -19,92 +19,110 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 use crate::{
+    crypt,
     envelope::{DhtMessageFlags, DhtMessageHeader, NodeDestination},
     inbound::DhtInboundMessage,
-    proto::envelope::{DhtEnvelope, DhtMessageType},
+    outbound::message::{DhtOutboundMessage, WrappedReplyTx},
+    proto::envelope::{DhtEnvelope, DhtMessageType, Network, OriginMac},
 };
 use rand::rngs::OsRng;
-use std::sync::Arc;
+use std::{convert::TryInto, sync::Arc};
 use tari_comms::{
-    connection::NetAddress,
-    message::{InboundMessage, MessageEnvelopeHeader, MessageFlags},
-    peer_manager::{NodeIdentity, Peer, PeerFeatures, PeerFlags, PeerManager},
-    types::CommsDatabase,
+    message::{InboundMessage, MessageExt, MessageTag},
+    multiaddr::Multiaddr,
+    peer_manager::{NodeId, NodeIdentity, Peer, PeerFeatures, PeerFlags, PeerManager},
+    transports::MemoryTransport,
+    types::{CommsDatabase, CommsPublicKey, CommsSecretKey},
     utils::signature,
+    Bytes,
+};
+use tari_crypto::{
+    keys::PublicKey,
+    tari_utilities::{message_format::MessageFormat, ByteArray},
 };
 use tari_storage::lmdb_store::LMDBBuilder;
-use tari_test_utils::{paths::create_random_database_path, random};
-use tari_utilities::message_format::MessageFormat;
+use tari_test_utils::{paths::create_temporary_data_path, random};
 
-pub fn make_node_identity() -> Arc<NodeIdentity> {
-    Arc::new(
-        NodeIdentity::random(
-            &mut OsRng::new().unwrap(),
-            "127.0.0.1:9000".parse().unwrap(),
-            PeerFeatures::COMMUNICATION_NODE,
-        )
-        .unwrap(),
-    )
+pub fn make_identity(features: PeerFeatures) -> Arc<NodeIdentity> {
+    let public_addr = format!("/memory/{}", MemoryTransport::acquire_next_memsocket_port())
+        .parse()
+        .unwrap();
+    Arc::new(NodeIdentity::random(&mut OsRng, public_addr, features).unwrap())
 }
 
-pub fn make_peer() -> Peer {
-    let node_identity = make_node_identity();
-    Peer::new(
-        node_identity.public_key().clone(),
-        node_identity.node_id().clone(),
-        vec![node_identity.control_service_address()].into(),
-        PeerFlags::empty(),
-        PeerFeatures::COMMUNICATION_NODE,
-    )
+pub fn make_node_identity() -> Arc<NodeIdentity> {
+    make_identity(PeerFeatures::COMMUNICATION_NODE)
 }
 
 pub fn make_client_identity() -> Arc<NodeIdentity> {
-    Arc::new(
-        NodeIdentity::random(
-            &mut OsRng::new().unwrap(),
-            "127.0.0.1:9000".parse().unwrap(),
-            PeerFeatures::COMMUNICATION_CLIENT,
-        )
-        .unwrap(),
-    )
+    make_identity(PeerFeatures::COMMUNICATION_CLIENT)
 }
 
-pub fn make_comms_inbound_message(
-    node_identity: &NodeIdentity,
-    message: Vec<u8>,
-    flags: MessageFlags,
-) -> InboundMessage
-{
+pub fn make_peer() -> Peer {
+    make_identity(PeerFeatures::COMMUNICATION_NODE).to_peer()
+}
+
+pub fn make_comms_inbound_message(node_identity: &NodeIdentity, message: Bytes) -> InboundMessage {
     InboundMessage::new(
-        Peer::new(
+        Arc::new(Peer::new(
             node_identity.public_key().clone(),
             node_identity.node_id().clone(),
-            Vec::<NetAddress>::new().into(),
+            Vec::<Multiaddr>::new().into(),
             PeerFlags::empty(),
             PeerFeatures::COMMUNICATION_NODE,
-        ),
-        MessageEnvelopeHeader {
-            public_key: node_identity.public_key().clone(),
-            signature: Vec::new(),
-            flags,
-        },
+            &[],
+        )),
         message,
     )
 }
 
-pub fn make_dht_header(node_identity: &NodeIdentity, message: &Vec<u8>, flags: DhtMessageFlags) -> DhtMessageHeader {
+pub fn make_dht_header(
+    node_identity: &NodeIdentity,
+    e_pk: &CommsPublicKey,
+    e_sk: &CommsSecretKey,
+    message: &[u8],
+    flags: DhtMessageFlags,
+    include_origin: bool,
+    trace: MessageTag,
+) -> DhtMessageHeader
+{
     DhtMessageHeader {
         version: 0,
         destination: NodeDestination::Unknown,
-        origin_public_key: node_identity.public_key().clone(),
-        origin_signature: signature::sign(&mut OsRng::new().unwrap(), node_identity.secret_key().clone(), message)
+        ephemeral_public_key: if flags.is_encrypted() { Some(e_pk.clone()) } else { None },
+        origin_mac: if include_origin {
+            make_valid_origin_mac(node_identity, &e_sk, message, flags)
+        } else {
+            Vec::new()
+        },
+        message_type: DhtMessageType::None,
+        network: Network::LocalTest,
+        flags,
+        message_tag: trace,
+    }
+}
+
+pub fn make_valid_origin_mac(
+    node_identity: &NodeIdentity,
+    e_sk: &CommsSecretKey,
+    body: &[u8],
+    flags: DhtMessageFlags,
+) -> Vec<u8>
+{
+    let mac = OriginMac {
+        public_key: node_identity.public_key().to_vec(),
+        signature: signature::sign(&mut OsRng, node_identity.secret_key().clone(), body)
             .unwrap()
             .to_binary()
             .unwrap(),
-        message_type: DhtMessageType::None,
-        flags,
+    };
+    let body = mac.to_encoded_bytes();
+    if flags.is_encrypted() {
+        let shared_secret = crypt::generate_ecdh_secret(e_sk, node_identity.public_key());
+        crypt::encrypt(&shared_secret, &body).unwrap()
+    } else {
+        body
     }
 }
 
@@ -112,31 +130,53 @@ pub fn make_dht_inbound_message(
     node_identity: &NodeIdentity,
     body: Vec<u8>,
     flags: DhtMessageFlags,
+    include_origin: bool,
 ) -> DhtInboundMessage
 {
+    let msg_tag = MessageTag::new();
+    let envelope = make_dht_envelope(node_identity, body, flags, include_origin, msg_tag);
     DhtInboundMessage::new(
-        make_dht_header(node_identity, &body, flags),
-        Peer::new(
+        msg_tag,
+        envelope.header.unwrap().try_into().unwrap(),
+        Arc::new(Peer::new(
             node_identity.public_key().clone(),
             node_identity.node_id().clone(),
-            Vec::<NetAddress>::new().into(),
+            Vec::<Multiaddr>::new().into(),
             PeerFlags::empty(),
             PeerFeatures::COMMUNICATION_NODE,
-        ),
-        body,
+            &[],
+        )),
+        envelope.body,
     )
 }
 
-pub fn make_dht_envelope(node_identity: &NodeIdentity, message: Vec<u8>, flags: DhtMessageFlags) -> DhtEnvelope {
-    DhtEnvelope::new(make_dht_header(node_identity, &message, flags).into(), message)
+pub fn make_keypair() -> (CommsSecretKey, CommsPublicKey) {
+    CommsPublicKey::random_keypair(&mut OsRng)
+}
+
+pub fn make_dht_envelope(
+    node_identity: &NodeIdentity,
+    mut message: Vec<u8>,
+    flags: DhtMessageFlags,
+    include_origin: bool,
+    trace: MessageTag,
+) -> DhtEnvelope
+{
+    let (e_sk, e_pk) = make_keypair();
+    if flags.is_encrypted() {
+        let shared_secret = crypt::generate_ecdh_secret(&e_sk, node_identity.public_key());
+        message = crypt::encrypt(&shared_secret, &message).unwrap();
+    }
+    let header = make_dht_header(node_identity, &e_pk, &e_sk, &message, flags, include_origin, trace).into();
+    DhtEnvelope::new(header, message.into())
 }
 
 pub fn make_peer_manager() -> Arc<PeerManager> {
     let database_name = random::string(8);
-    let path = create_random_database_path();
+    let path = create_temporary_data_path();
     let datastore = LMDBBuilder::new()
         .set_path(path.to_str().unwrap())
-        .set_environment_size(10)
+        .set_environment_size(50)
         .set_max_number_of_databases(1)
         .add_database(&database_name, lmdb_zero::db::CREATE)
         .build()
@@ -147,4 +187,22 @@ pub fn make_peer_manager() -> Arc<PeerManager> {
     PeerManager::new(CommsDatabase::new(Arc::new(peer_database)))
         .map(Arc::new)
         .unwrap()
+}
+
+pub fn create_outbound_message(body: &[u8]) -> DhtOutboundMessage {
+    let msg_tag = MessageTag::new();
+    DhtOutboundMessage {
+        tag: msg_tag,
+        destination_node_id: NodeId::default(),
+        destination: Default::default(),
+        dht_message_type: Default::default(),
+        network: Network::LocalTest,
+        dht_flags: Default::default(),
+        custom_header: None,
+        body: body.to_vec().into(),
+        ephemeral_public_key: None,
+        reply_tx: WrappedReplyTx::none(),
+        origin_mac: None,
+        is_broadcast: false,
+    }
 }

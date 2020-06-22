@@ -19,14 +19,18 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+pub mod config;
 pub mod error;
 pub mod handle;
+pub mod protocols;
 pub mod service;
 pub mod storage;
 
 use crate::{
     output_manager_service::handle::OutputManagerHandle,
     transaction_service::{
+        config::TransactionServiceConfig,
         handle::TransactionServiceHandle,
         service::TransactionService,
         storage::database::{TransactionBackend, TransactionDatabase},
@@ -35,16 +39,19 @@ use crate::{
 use futures::{future, Future, Stream, StreamExt};
 use log::*;
 use std::sync::Arc;
-use tari_broadcast_channel::bounded;
 use tari_comms::peer_manager::NodeIdentity;
 use tari_comms_dht::outbound::OutboundMessageRequester;
+use tari_core::{
+    base_node::proto::base_node as BaseNodeProto,
+    mempool::proto::mempool as MempoolProto,
+    transactions::{transaction_protocol::proto, types::CryptoFactories},
+};
 use tari_p2p::{
-    comms_connector::PeerMessage,
+    comms_connector::SubscriptionFactory,
     domain_message::DomainMessage,
     services::utils::{map_decode, ok_or_skip_result},
     tari_message::TariMessageType,
 };
-use tari_pubsub::TopicSubscriptionFactory;
 use tari_service_framework::{
     handles::ServiceHandlesFuture,
     reply_channel,
@@ -52,59 +59,86 @@ use tari_service_framework::{
     ServiceInitializer,
 };
 use tari_shutdown::ShutdownSignal;
-use tari_transactions::transaction_protocol::proto;
-use tokio::runtime::TaskExecutor;
+use tokio::{runtime, sync::broadcast};
 
-const LOG_TARGET: &'static str = "base_layer::wallet::transaction_service";
+const LOG_TARGET: &str = "wallet::transaction_service";
+const SUBSCRIPTION_LABEL: &str = "Transaction Service";
 
 pub struct TransactionServiceInitializer<T>
 where T: TransactionBackend
 {
-    subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+    config: TransactionServiceConfig,
+    subscription_factory: Arc<SubscriptionFactory>,
     backend: Option<T>,
     node_identity: Arc<NodeIdentity>,
+    factories: CryptoFactories,
 }
 
 impl<T> TransactionServiceInitializer<T>
 where T: TransactionBackend
 {
     pub fn new(
-        subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+        config: TransactionServiceConfig,
+        subscription_factory: Arc<SubscriptionFactory>,
         backend: T,
         node_identity: Arc<NodeIdentity>,
+        factories: CryptoFactories,
     ) -> Self
     {
         Self {
+            config,
             subscription_factory,
             backend: Some(backend),
             node_identity,
+            factories,
         }
     }
 
     /// Get a stream of inbound Text messages
     fn transaction_stream(&self) -> impl Stream<Item = DomainMessage<proto::TransactionSenderMessage>> {
         self.subscription_factory
-            .get_subscription(TariMessageType::Transaction)
+            .get_subscription(TariMessageType::SenderPartialTransaction, SUBSCRIPTION_LABEL)
             .map(map_decode::<proto::TransactionSenderMessage>)
             .filter_map(ok_or_skip_result)
     }
 
     fn transaction_reply_stream(&self) -> impl Stream<Item = DomainMessage<proto::RecipientSignedMessage>> {
         self.subscription_factory
-            .get_subscription(TariMessageType::TransactionReply)
+            .get_subscription(TariMessageType::ReceiverPartialTransactionReply, SUBSCRIPTION_LABEL)
             .map(map_decode::<proto::RecipientSignedMessage>)
+            .filter_map(ok_or_skip_result)
+    }
+
+    fn transaction_finalized_stream(&self) -> impl Stream<Item = DomainMessage<proto::TransactionFinalizedMessage>> {
+        self.subscription_factory
+            .get_subscription(TariMessageType::TransactionFinalized, SUBSCRIPTION_LABEL)
+            .map(map_decode::<proto::TransactionFinalizedMessage>)
+            .filter_map(ok_or_skip_result)
+    }
+
+    fn mempool_response_stream(&self) -> impl Stream<Item = DomainMessage<MempoolProto::MempoolServiceResponse>> {
+        self.subscription_factory
+            .get_subscription(TariMessageType::MempoolResponse, SUBSCRIPTION_LABEL)
+            .map(map_decode::<MempoolProto::MempoolServiceResponse>)
+            .filter_map(ok_or_skip_result)
+    }
+
+    fn base_node_response_stream(&self) -> impl Stream<Item = DomainMessage<BaseNodeProto::BaseNodeServiceResponse>> {
+        self.subscription_factory
+            .get_subscription(TariMessageType::BaseNodeResponse, SUBSCRIPTION_LABEL)
+            .map(map_decode::<BaseNodeProto::BaseNodeServiceResponse>)
             .filter_map(ok_or_skip_result)
     }
 }
 
 impl<T> ServiceInitializer for TransactionServiceInitializer<T>
-where T: TransactionBackend + 'static
+where T: TransactionBackend + Clone + 'static
 {
     type Future = impl Future<Output = Result<(), ServiceInitializationError>>;
 
     fn initialize(
         &mut self,
-        executor: TaskExecutor,
+        executor: runtime::Handle,
         handles_fut: ServiceHandlesFuture,
         shutdown: ShutdownSignal,
     ) -> Self::Future
@@ -112,10 +146,13 @@ where T: TransactionBackend + 'static
         let (sender, receiver) = reply_channel::unbounded();
         let transaction_stream = self.transaction_stream();
         let transaction_reply_stream = self.transaction_reply_stream();
+        let transaction_finalized_stream = self.transaction_finalized_stream();
+        let mempool_response_stream = self.mempool_response_stream();
+        let base_node_response_stream = self.base_node_response_stream();
 
-        let (publisher, subscriber) = bounded(100);
+        let (publisher, _) = broadcast::channel(200);
 
-        let transaction_handle = TransactionServiceHandle::new(sender, subscriber);
+        let transaction_handle = TransactionServiceHandle::new(sender, publisher.clone());
 
         // Register handle before waiting for handles to be ready
         handles_fut.register(transaction_handle);
@@ -126,6 +163,8 @@ where T: TransactionBackend + 'static
             .expect("Cannot start Transaction Service without providing a backend");
 
         let node_identity = self.node_identity.clone();
+        let factories = self.factories.clone();
+        let config = self.config.clone();
 
         executor.spawn(async move {
             let handles = handles_fut.await;
@@ -138,14 +177,19 @@ where T: TransactionBackend + 'static
                 .expect("Output Manager Service handle required for TransactionService");
 
             let service = TransactionService::new(
+                config,
                 TransactionDatabase::new(backend),
                 receiver,
                 transaction_stream,
                 transaction_reply_stream,
+                transaction_finalized_stream,
+                mempool_response_stream,
+                base_node_response_stream,
                 output_manager_service,
                 outbound_message_service,
                 publisher,
                 node_identity,
+                factories,
             )
             .start();
             futures::pin_mut!(service);

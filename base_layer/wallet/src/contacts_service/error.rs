@@ -22,6 +22,7 @@
 
 use crate::contacts_service::storage::database::DbKey;
 use derive_error::Error;
+use diesel::result::Error as DieselError;
 use tari_service_framework::reply_channel::TransportChannelError;
 
 #[derive(Debug, Error, PartialEq)]
@@ -36,12 +37,21 @@ pub enum ContactsServiceError {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ContactsServiceStorageError {
-    /// Tried to insert an output that already exists in the database
-    DuplicateContact,
     /// This write operation is not supported for provided DbKey
     OperationNotSupported,
+    /// Error converting a type
+    ConversionError,
+    /// Could not find all values specified for batch operation
+    ValuesNotFound,
     #[error(non_std, no_from)]
     ValueNotFound(DbKey),
     #[error(msg_embedded, non_std, no_from)]
     UnexpectedResult(String),
+    R2d2Error,
+    DieselError(DieselError),
+    DieselConnectionError(diesel::ConnectionError),
+    #[error(msg_embedded, no_from, non_std)]
+    DatabaseMigrationError(String),
+    #[error(msg_embedded, non_std, no_from)]
+    BlockingTaskSpawnError(String),
 }

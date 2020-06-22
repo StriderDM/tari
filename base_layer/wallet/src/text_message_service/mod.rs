@@ -49,9 +49,9 @@ use tari_service_framework::{
     ServiceInitializationError,
     ServiceInitializer,
 };
-use tokio::runtime::TaskExecutor;
+use tokio::runtime::runtime::Handle;
 
-const LOG_TARGET: &'static str = "wallet::text_message_service::initializer";
+const LOG_TARGET: &str = "wallet::text_message_service::initializer";
 
 pub struct TextMessageServiceInitializer {
     pub_key: Option<CommsPublicKey>,
@@ -92,7 +92,7 @@ impl TextMessageServiceInitializer {
 impl ServiceInitializer for TextMessageServiceInitializer {
     type Future = impl Future<Output = Result<(), ServiceInitializationError>>;
 
-    fn initialize(&mut self, executor: TaskExecutor, handles_fut: ServiceHandlesFuture) -> Self::Future {
+    fn initialize(&mut self, executor: runtime::Handle, handles_fut: ServiceHandlesFuture) -> Self::Future {
         let pub_key = self
             .pub_key
             .take()
@@ -104,7 +104,7 @@ impl ServiceInitializer for TextMessageServiceInitializer {
             .expect("text message service initializer already called");
 
         let (sender, receiver) = reply_channel::unbounded();
-        let (publisher, subscriber) = bounded(100);
+        let (publisher, subscriber) = bounded(100, 117);
 
         let text_message_stream = self.text_message_stream();
         let text_message_ack_stream = self.text_message_ack_stream();

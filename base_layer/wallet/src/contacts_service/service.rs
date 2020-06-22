@@ -29,10 +29,10 @@ use futures::{pin_mut, StreamExt};
 use log::*;
 use tari_service_framework::reply_channel;
 
-const LOG_TARGET: &'static str = "base_layer::wallet:contacts_service";
+const LOG_TARGET: &str = "wallet:contacts_service";
 
 pub struct ContactsService<T>
-where T: ContactsBackend
+where T: ContactsBackend + 'static
 {
     db: ContactsDatabase<T>,
     request_stream:
@@ -40,7 +40,7 @@ where T: ContactsBackend
 }
 
 impl<T> ContactsService<T>
-where T: ContactsBackend
+where T: ContactsBackend + 'static
 {
     pub fn new(
         request_stream: reply_channel::Receiver<
@@ -65,12 +65,15 @@ where T: ContactsBackend
             .fuse();
         pin_mut!(request_stream);
 
-        info!("Contacts Service started");
+        info!(target: LOG_TARGET, "Contacts Service started");
         loop {
             futures::select! {
                 request_context = request_stream.select_next_some() => {
                     let (request, reply_tx) = request_context.split();
-                    let _ = reply_tx.send(self.handle_request(request).await).or_else(|resp| {
+                    let _ = reply_tx.send(self.handle_request(request).await.or_else(|resp| {
+                        error!(target: LOG_TARGET, "Error handling request: {:?}", resp);
+                        Err(resp)
+                    })).or_else(|resp| {
                         error!(target: LOG_TARGET, "Failed to send reply");
                         Err(resp)
                     });
@@ -81,7 +84,7 @@ where T: ContactsBackend
                 }
             }
         }
-        info!("Contacts Service ended");
+        info!(target: LOG_TARGET, "Contacts Service ended");
         Ok(())
     }
 
@@ -90,20 +93,29 @@ where T: ContactsBackend
         request: ContactsServiceRequest,
     ) -> Result<ContactsServiceResponse, ContactsServiceError>
     {
-        Ok(match request {
+        match request {
             ContactsServiceRequest::GetContact(pk) => {
-                self.db.get_contact(&pk).map(|c| ContactsServiceResponse::Contact(c))?
+                Ok(self.db.get_contact(pk).await.map(ContactsServiceResponse::Contact)?)
             },
-            ContactsServiceRequest::SaveContact(c) => {
-                self.db.save_contact(c).map(|_| ContactsServiceResponse::ContactSaved)?
+            ContactsServiceRequest::UpsertContact(c) => {
+                self.db.upsert_contact(c.clone()).await?;
+                info!(
+                    target: LOG_TARGET,
+                    "Contact Saved: \nAlias: {}\nPubKey: {} ", c.alias, c.public_key
+                );
+                Ok(ContactsServiceResponse::ContactSaved)
             },
-            ContactsServiceRequest::RemoveContact(pk) => self
-                .db
-                .remove_contact(&pk)
-                .map(|c| ContactsServiceResponse::ContactRemoved(c))?,
+            ContactsServiceRequest::RemoveContact(pk) => {
+                let result = self.db.remove_contact(pk).await?;
+                info!(
+                    target: LOG_TARGET,
+                    "Contact Removed: \nAlias: {}\nPubKey: {} ", result.alias, result.public_key
+                );
+                Ok(ContactsServiceResponse::ContactRemoved(result))
+            },
             ContactsServiceRequest::GetContacts => {
-                self.db.get_contacts().map(|c| ContactsServiceResponse::Contacts(c))?
+                Ok(self.db.get_contacts().await.map(ContactsServiceResponse::Contacts)?)
             },
-        })
+        }
     }
 }

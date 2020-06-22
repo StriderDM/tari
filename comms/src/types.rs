@@ -20,17 +20,17 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::peer_manager::{peer_key::PeerKey, Peer};
+use crate::peer_manager::{Peer, PeerId};
 use tari_crypto::{common::Blake256, keys::PublicKey, ristretto::RistrettoPublicKey};
 use tari_storage::lmdb_store::LMDBStore;
 #[cfg(test)]
-use tari_storage::HMapDatabase;
+use tari_storage::HashmapDatabase;
 #[cfg(not(test))]
 use tari_storage::LMDBWrapper;
-use tari_utilities::ciphers::chacha20::ChaCha20;
 
 /// The default port that control services listen on
-pub const DEFAULT_LISTENER_ADDRESS: &str = "0.0.0.0:7899";
+pub const DEFAULT_CONTROL_PORT_ADDRESS: &str = "/ip4/0.0.0.0/tcp/7899";
+pub const DEFAULT_LISTENER_ADDRESS: &str = "/ip4/0.0.0.0/tcp/7898";
 
 /// Specify the digest type for the signature challenges
 pub type Challenge = Blake256;
@@ -40,15 +40,12 @@ pub type CommsPublicKey = RistrettoPublicKey;
 pub type CommsSecretKey = <CommsPublicKey as PublicKey>::K;
 
 /// Specify the RNG that should be used for random selection
-pub type CommsRng = rand::OsRng;
-
-/// Specify what cipher to use for encryption/decryption
-pub type CommsCipher = ChaCha20;
+pub type CommsRng = rand::rngs::OsRng;
 
 /// Datastore and Database used for persistence storage
 pub type CommsDataStore = LMDBStore;
 
 #[cfg(not(test))]
-pub type CommsDatabase = LMDBWrapper<PeerKey, Peer>;
+pub type CommsDatabase = LMDBWrapper<PeerId, Peer>;
 #[cfg(test)]
-pub type CommsDatabase = HMapDatabase<PeerKey, Peer>;
+pub type CommsDatabase = HashmapDatabase<PeerId, Peer>;

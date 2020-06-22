@@ -28,9 +28,9 @@ mod local_interface;
 mod outbound_interface;
 
 // Public re-exports
-pub use comms_request::{MmrStateRequest, NodeCommsRequest, NodeCommsRequestType};
+pub use comms_request::{MmrStateRequest, NodeCommsRequest};
 pub use comms_response::NodeCommsResponse;
 pub use error::CommsInterfaceError;
-pub use inbound_handlers::{BlockEvent, InboundNodeCommsHandlers};
-pub use local_interface::LocalNodeCommsInterface;
+pub use inbound_handlers::{BlockEvent, Broadcast, InboundNodeCommsHandlers};
+pub use local_interface::{BlockEventReceiver, BlockEventSender, LocalNodeCommsInterface};
 pub use outbound_interface::OutboundNodeCommsInterface;

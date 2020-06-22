@@ -21,16 +21,15 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use super::peer_message::PeerMessage;
-use futures::{task::Context, Future, Poll, Sink, SinkExt};
+use futures::{task::Context, Future, Sink, SinkExt};
 use log::*;
-use std::{error::Error, pin::Pin, sync::Arc};
+use std::{error::Error, pin::Pin, sync::Arc, task::Poll};
+use tari_comms::pipeline::PipelineError;
 use tari_comms_dht::{domain_message::MessageHeader, inbound::DecryptedDhtMessage};
-use tari_comms_middleware::MiddlewareError;
 use tower::Service;
 
-const LOG_TARGET: &'static str = "comms::middleware::inbound_domain_connector";
-
-/// This service receives DecryptedInboundMessages, deserializes the MessageHeader and
+const LOG_TARGET: &str = "comms::middleware::inbound_connector";
+/// This service receives DecryptedDhtMessage, deserializes the MessageHeader and
 /// sends a `PeerMessage` on the given sink.
 #[derive(Clone)]
 pub struct InboundDomainConnector<TSink> {
@@ -48,55 +47,100 @@ where
     TSink: Sink<Arc<PeerMessage>> + Unpin + Clone,
     TSink::Error: Error + Send + Sync + 'static,
 {
-    type Error = MiddlewareError;
+    type Error = PipelineError;
     type Response = ();
 
     type Future = impl Future<Output = Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.sink).poll_ready(cx).map_err(Into::into)
+        Pin::new(&mut self.sink)
+            .poll_ready(cx)
+            .map_err(PipelineError::from_debug)
     }
 
     fn call(&mut self, msg: DecryptedDhtMessage) -> Self::Future {
-        Self::handle_message(self.sink.clone(), msg)
+        let mut sink = self.sink.clone();
+        async move {
+            let peer_message = Self::construct_peer_message(msg)?;
+            // If this fails there is something wrong with the sink and the pubsub middleware should not
+            // continue
+            sink.send(Arc::new(peer_message))
+                .await
+                .map_err(PipelineError::from_debug)?;
+
+            Ok(())
+        }
     }
 }
 
-impl<TSink> InboundDomainConnector<TSink>
-where
-    TSink: Sink<Arc<PeerMessage>> + Unpin,
-    TSink::Error: Error + Send + Sync + 'static,
-{
-    async fn handle_message(mut sink: TSink, mut inbound_message: DecryptedDhtMessage) -> Result<(), MiddlewareError> {
-        let envelope_body = inbound_message.success_mut().ok_or("Message failed to decrypt")?;
+impl<TSink> InboundDomainConnector<TSink> {
+    fn construct_peer_message(mut inbound_message: DecryptedDhtMessage) -> Result<PeerMessage, PipelineError> {
+        let envelope_body = inbound_message
+            .success_mut()
+            .ok_or_else(|| "Message failed to decrypt")?;
         let header = envelope_body
-            .decode_part::<MessageHeader>(0)?
-            .ok_or("envelope body did not contain a header")?;
+            .decode_part::<MessageHeader>(0)
+            .map_err(PipelineError::from_debug)?
+            .ok_or_else(|| "envelope body did not contain a header")?;
 
         let msg_bytes = envelope_body
             .take_part(1)
-            .ok_or("envelope body did not contain a message body")?;
+            .ok_or_else(|| "envelope body did not contain a message body")?;
 
         let DecryptedDhtMessage {
             source_peer,
             dht_header,
+            authenticated_origin,
             ..
         } = inbound_message;
 
         let peer_message = PeerMessage {
             message_header: header,
-            source_peer,
+            source_peer: Clone::clone(&*source_peer),
+            authenticated_origin,
             dht_header,
             body: msg_bytes,
         };
+        trace!(
+            target: LOG_TARGET,
+            "Forwarding message {:?} to pubsub, Trace: {}",
+            inbound_message.tag,
+            &peer_message.dht_header.message_tag
+        );
+        Ok(peer_message)
+    }
+}
 
-        trace!(target: LOG_TARGET, "Sending domain message on sink");
+impl<TSink> Sink<DecryptedDhtMessage> for InboundDomainConnector<TSink>
+where
+    TSink: Sink<Arc<PeerMessage>> + Unpin,
+    TSink::Error: Error + Send + Sync + 'static,
+{
+    type Error = PipelineError;
 
-        // If this fails there is something wrong with the sink and the pubsub middleware should not
-        // continue
-        sink.send(Arc::new(peer_message)).await.map_err(|err| Box::new(err))?;
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.sink)
+            .poll_ready(cx)
+            .map_err(PipelineError::from_debug)
+    }
 
-        Ok(())
+    fn start_send(mut self: Pin<&mut Self>, item: DecryptedDhtMessage) -> Result<(), Self::Error> {
+        let item = Self::construct_peer_message(item)?;
+        Pin::new(&mut self.sink)
+            .start_send(Arc::new(item))
+            .map_err(PipelineError::from_debug)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.sink)
+            .poll_flush(cx)
+            .map_err(PipelineError::from_debug)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.sink)
+            .poll_close(cx)
+            .map_err(PipelineError::from_debug)
     }
 }
 
@@ -106,58 +150,63 @@ mod test {
     use crate::test_utils::{make_dht_inbound_message, make_node_identity};
     use futures::{channel::mpsc, executor::block_on, StreamExt};
     use tari_comms::{message::MessageExt, wrap_in_envelope_body};
-    use tari_comms_dht::{domain_message::MessageHeader, envelope::DhtMessageFlags};
+    use tari_comms_dht::domain_message::MessageHeader;
+    use tower::ServiceExt;
 
-    #[test]
-    fn handle_message() {
+    #[tokio_macros::test_basic]
+    async fn handle_message() {
         let (tx, mut rx) = mpsc::channel(1);
         let header = MessageHeader::new(123);
-        let msg = wrap_in_envelope_body!(header, b"my message".to_vec()).unwrap();
+        let msg = wrap_in_envelope_body!(header, b"my message".to_vec());
 
-        let inbound_message = make_dht_inbound_message(
-            &make_node_identity(),
-            msg.to_encoded_bytes().unwrap(),
-            DhtMessageFlags::empty(),
-        );
-        let decrypted = DecryptedDhtMessage::succeeded(msg, inbound_message);
-        block_on(InboundDomainConnector::handle_message(tx, decrypted)).unwrap();
+        let inbound_message = make_dht_inbound_message(&make_node_identity(), msg.to_encoded_bytes());
+        let decrypted = DecryptedDhtMessage::succeeded(msg, None, inbound_message);
+        InboundDomainConnector::new(tx).oneshot(decrypted).await.unwrap();
 
         let peer_message = block_on(rx.next()).unwrap();
         assert_eq!(peer_message.message_header.message_type, 123);
         assert_eq!(peer_message.decode_message::<String>().unwrap(), "my message");
     }
 
-    #[test]
-    fn handle_message_fail_deserialize() {
+    #[tokio_macros::test_basic]
+    async fn send_on_sink() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let header = MessageHeader::new(123);
+        let msg = wrap_in_envelope_body!(header, b"my message".to_vec());
+
+        let inbound_message = make_dht_inbound_message(&make_node_identity(), msg.to_encoded_bytes());
+        let decrypted = DecryptedDhtMessage::succeeded(msg, None, inbound_message);
+
+        InboundDomainConnector::new(tx).send(decrypted).await.unwrap();
+
+        let peer_message = block_on(rx.next()).unwrap();
+        assert_eq!(peer_message.message_header.message_type, 123);
+        assert_eq!(peer_message.decode_message::<String>().unwrap(), "my message");
+    }
+
+    #[tokio_macros::test_basic]
+    async fn handle_message_fail_deserialize() {
         let (tx, mut rx) = mpsc::channel(1);
         let header = b"dodgy header".to_vec();
-        let msg = wrap_in_envelope_body!(header, b"message".to_vec()).unwrap();
+        let msg = wrap_in_envelope_body!(header, b"message".to_vec());
 
-        let inbound_message = make_dht_inbound_message(
-            &make_node_identity(),
-            msg.to_encoded_bytes().unwrap(),
-            DhtMessageFlags::empty(),
-        );
-        let decrypted = DecryptedDhtMessage::succeeded(msg, inbound_message);
-        block_on(InboundDomainConnector::handle_message(tx, decrypted)).unwrap_err();
+        let inbound_message = make_dht_inbound_message(&make_node_identity(), msg.to_encoded_bytes());
+        let decrypted = DecryptedDhtMessage::succeeded(msg, None, inbound_message);
+        InboundDomainConnector::new(tx).oneshot(decrypted).await.unwrap_err();
 
         assert!(rx.try_next().unwrap().is_none());
     }
 
-    #[test]
-    fn handle_message_fail_send() {
+    #[tokio_macros::test_basic]
+    async fn handle_message_fail_send() {
         // Drop the receiver of the channel, this is the only reason this middleware should return an error
         // from it's call function
         let (tx, _) = mpsc::channel(1);
         let header = MessageHeader::new(123);
-        let msg = wrap_in_envelope_body!(header, b"my message".to_vec()).unwrap();
-        let inbound_message = make_dht_inbound_message(
-            &make_node_identity(),
-            msg.to_encoded_bytes().unwrap(),
-            DhtMessageFlags::empty(),
-        );
-        let decrypted = DecryptedDhtMessage::succeeded(msg, inbound_message);
-        let result = block_on(InboundDomainConnector::handle_message(tx, decrypted));
+        let msg = wrap_in_envelope_body!(header, b"my message".to_vec());
+        let inbound_message = make_dht_inbound_message(&make_node_identity(), msg.to_encoded_bytes());
+        let decrypted = DecryptedDhtMessage::succeeded(msg, None, inbound_message);
+        let result = InboundDomainConnector::new(tx).oneshot(decrypted).await;
         assert!(result.is_err());
     }
 }

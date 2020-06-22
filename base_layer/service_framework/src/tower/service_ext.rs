@@ -20,8 +20,8 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use futures::{ready, task::Context, Future, FutureExt, Poll};
-use std::pin::Pin;
+use futures::{ready, task::Context, Future, FutureExt};
+use std::{pin::Pin, task::Poll};
 use tower_service::Service;
 
 impl<T: ?Sized, TRequest> ServiceExt<TRequest> for T where T: Service<TRequest> {}
@@ -88,13 +88,13 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::tower::service_fn;
     use futures::{future, FutureExt};
     use futures_test::task::panic_context;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+    use tower::service_fn;
 
     #[test]
     fn service_ready() {

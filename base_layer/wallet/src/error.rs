@@ -21,33 +21,60 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
+    contacts_service::error::ContactsServiceError,
     output_manager_service::error::OutputManagerError,
     storage::database::DbKey,
     transaction_service::error::TransactionServiceError,
 };
 use derive_error::Error;
-use tari_comms::{builder::CommsError, connection::NetAddressError, peer_manager::PeerManagerError};
-use tari_p2p::initialization::CommsInitializationError;
+use diesel::result::Error as DieselError;
+use log::SetLoggerError;
+use serde_json::Error as SerdeJsonError;
+use tari_comms::{connectivity::ConnectivityError, multiaddr, peer_manager::PeerManagerError};
+use tari_comms_dht::store_forward::StoreAndForwardError;
+use tari_crypto::tari_utilities::hex::HexError;
+use tari_p2p::{initialization::CommsInitializationError, services::liveness::error::LivenessError};
 
 #[derive(Debug, Error)]
 pub enum WalletError {
     CommsInitializationError(CommsInitializationError),
-    CommsError(CommsError),
     OutputManagerError(OutputManagerError),
     TransactionServiceError(TransactionServiceError),
     PeerManagerError(PeerManagerError),
-    NetAddressError(NetAddressError),
+    MultiaddrError(multiaddr::Error),
     WalletStorageError(WalletStorageError),
+    SetLoggerError(SetLoggerError),
+    ContactsServiceError(ContactsServiceError),
+    LivenessServiceError(LivenessError),
+    StoreAndForwardError(StoreAndForwardError),
+    ConnectivityError(ConnectivityError),
 }
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum WalletStorageError {
     /// Tried to insert an output that already exists in the database
     DuplicateContact,
     /// This write operation is not supported for provided DbKey
     OperationNotSupported,
+    /// Error converting a type
+    ConversionError,
+    /// Could not find all values specified for batch operation
+    ValuesNotFound,
+    /// Db Path does not exist
+    DbPathDoesNotExist,
+    SerdeJsonError(SerdeJsonError),
+    R2d2Error,
+    DieselError(DieselError),
+    DieselConnectionError(diesel::ConnectionError),
+    #[error(msg_embedded, no_from, non_std)]
+    DatabaseMigrationError(String),
     #[error(non_std, no_from)]
     ValueNotFound(DbKey),
     #[error(msg_embedded, non_std, no_from)]
     UnexpectedResult(String),
+    #[error(msg_embedded, non_std, no_from)]
+    BlockingTaskSpawnError(String),
+    /// The storage path was invalid unicode or not supported by the host OS
+    InvalidUnicodePath,
+    HexError(HexError),
 }

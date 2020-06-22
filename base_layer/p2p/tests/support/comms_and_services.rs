@@ -22,69 +22,27 @@
 
 use futures::Sink;
 use std::{error::Error, sync::Arc, time::Duration};
-use tari_comms::{
-    builder::CommsNode,
-    control_service::ControlServiceConfig,
-    peer_manager::{NodeIdentity, Peer, PeerFlags},
-};
+use tari_comms::{peer_manager::NodeIdentity, CommsNode};
 use tari_comms_dht::Dht;
 use tari_p2p::{
     comms_connector::{InboundDomainConnector, PeerMessage},
-    initialization::{initialize_comms, CommsConfig},
+    initialization::initialize_local_test_comms,
 };
-use tari_test_utils::random;
-use tempdir::TempDir;
-use tokio::runtime::TaskExecutor;
 
-pub fn setup_comms_services<TSink>(
-    executor: TaskExecutor,
+pub async fn setup_comms_services<TSink>(
     node_identity: Arc<NodeIdentity>,
-    peers: Vec<NodeIdentity>,
+    peers: Vec<Arc<NodeIdentity>>,
     publisher: InboundDomainConnector<TSink>,
-) -> (Arc<CommsNode>, Dht)
+    data_path: &str,
+) -> (CommsNode, Dht)
 where
     TSink: Sink<Arc<PeerMessage>> + Clone + Unpin + Send + Sync + 'static,
     TSink::Error: Error + Send + Sync,
 {
-    let comms_config = CommsConfig {
-        node_identity: Arc::clone(&node_identity),
-        peer_connection_listening_address: "127.0.0.1".parse().unwrap(),
-        socks_proxy_address: None,
-        control_service: ControlServiceConfig {
-            listener_address: node_identity.control_service_address(),
-            socks_proxy_address: None,
-            requested_connection_timeout: Duration::from_millis(2000),
-        },
-        datastore_path: TempDir::new(random::string(8).as_str())
-            .unwrap()
-            .path()
-            .to_str()
-            .unwrap()
-            .to_string(),
-        establish_connection_timeout: Duration::from_secs(5),
-        peer_database_name: random::string(8),
-        inbound_buffer_size: 10,
-        outbound_buffer_size: 10,
-        dht: Default::default(),
-    };
-
-    let (comms, dht) = initialize_comms(executor, comms_config, publisher)
-        .map(|(comms, dht)| (Arc::new(comms), dht))
+    let peers = peers.into_iter().map(|ni| ni.to_peer()).collect();
+    let (comms, dht) = initialize_local_test_comms(node_identity, publisher, data_path, Duration::from_secs(1), peers)
+        .await
         .unwrap();
-
-    for p in peers {
-        let addr = p.control_service_address().clone();
-        comms
-            .peer_manager()
-            .add_peer(Peer::new(
-                p.public_key().clone(),
-                p.node_id().clone(),
-                addr.into(),
-                PeerFlags::default(),
-                p.features().clone(),
-            ))
-            .unwrap();
-    }
 
     (comms, dht)
 }

@@ -20,19 +20,14 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::chain_storage::MmrTree;
+use crate::{
+    blocks::NewBlockTemplate,
+    chain_storage::MmrTree,
+    proof_of_work::PowAlgorithm,
+    transactions::types::HashOutput,
+};
 use serde::{Deserialize, Serialize};
-use tari_transactions::types::HashOutput;
-
-/// NodeCommsRequestType is used to specify the amount of peers that need to be queried before a request can be
-/// finalized.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum NodeCommsRequestType {
-    /// Send the request to a single remote base node
-    Single,
-    /// Send the request to a number of remote base nodes and accumulate all the responses.
-    Many,
-}
+use std::fmt::{Display, Error, Formatter};
 
 /// A container for the parameters required for a FetchMmrState request.
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,8 +43,39 @@ pub enum NodeCommsRequest {
     GetChainMetadata,
     FetchKernels(Vec<HashOutput>),
     FetchHeaders(Vec<u64>),
+    FetchHeadersWithHashes(Vec<HashOutput>),
+    FetchHeadersAfter(Vec<HashOutput>, HashOutput),
     FetchUtxos(Vec<HashOutput>),
     FetchBlocks(Vec<u64>),
-    FetchMmrState(MmrStateRequest),
-    GetNewBlock,
+    FetchBlocksWithHashes(Vec<HashOutput>),
+    GetNewBlockTemplate(PowAlgorithm),
+    GetNewBlock(NewBlockTemplate),
+    GetTargetDifficulty(PowAlgorithm),
+    FetchMmrNodeCount(MmrTree, u64),
+    FetchMmrNodes(MmrTree, u32, u32),
+}
+
+impl Display for NodeCommsRequest {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        match self {
+            NodeCommsRequest::GetChainMetadata => f.write_str("GetChainMetadata"),
+            NodeCommsRequest::FetchKernels(v) => f.write_str(&format!("FetchKernels (n={})", v.len())),
+            NodeCommsRequest::FetchHeaders(v) => f.write_str(&format!("FetchHeaders (n={})", v.len())),
+            NodeCommsRequest::FetchHeadersWithHashes(v) => f.write_str(&format!("FetchHeaders (n={})", v.len())),
+            NodeCommsRequest::FetchHeadersAfter(v, _hash) => f.write_str(&format!("FetchHeadersAfter (n={})", v.len())),
+            NodeCommsRequest::FetchUtxos(v) => f.write_str(&format!("FetchUtxos (n={})", v.len())),
+            NodeCommsRequest::FetchBlocks(v) => f.write_str(&format!("FetchBlocks (n={})", v.len())),
+            NodeCommsRequest::FetchBlocksWithHashes(v) => f.write_str(&format!("FetchBlocks (n={})", v.len())),
+            NodeCommsRequest::GetNewBlockTemplate(algo) => f.write_str(&format!("GetNewBlockTemplate ({})", algo)),
+            NodeCommsRequest::GetNewBlock(b) => f.write_str(&format!("GetNewBlock (Block Height={})", b.header.height)),
+            NodeCommsRequest::GetTargetDifficulty(algo) => f.write_str(&format!("GetTargetDifficulty ({})", algo)),
+            NodeCommsRequest::FetchMmrNodeCount(tree, height) => {
+                f.write_str(&format!("FetchMmrNodeCount (tree={},Block Height={})", tree, height))
+            },
+            NodeCommsRequest::FetchMmrNodes(tree, pos, count) => f.write_str(&format!(
+                "FetchMmrNodeCount (tree={},pos={},count={})",
+                tree, pos, count
+            )),
+        }
+    }
 }

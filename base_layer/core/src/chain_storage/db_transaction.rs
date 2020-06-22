@@ -19,20 +19,36 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-//
 
-use crate::blocks::{blockheader::BlockHash, Block, BlockHeader};
-use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Error, Formatter};
-use tari_transactions::{
-    transaction::{TransactionInput, TransactionKernel, TransactionOutput},
-    types::HashOutput,
+use crate::{
+    blocks::{blockheader::BlockHash, Block, BlockHeader},
+    proof_of_work::Difficulty,
+    transactions::{
+        transaction::{TransactionInput, TransactionKernel, TransactionOutput},
+        types::HashOutput,
+    },
 };
-use tari_utilities::{hex::to_hex, Hashable};
+use serde::{Deserialize, Serialize};
+use std::{
+    convert::TryFrom,
+    fmt::{Display, Error, Formatter},
+};
+use strum_macros::Display;
+use tari_crypto::tari_utilities::{hex::to_hex, Hashable};
 
 #[derive(Debug)]
 pub struct DbTransaction {
     pub operations: Vec<WriteOperation>,
+}
+
+impl Display for DbTransaction {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.write_str("Db transaction: \n")?;
+        for write_op in &self.operations {
+            fmt.write_str(&format!("{}\n", write_op))?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for DbTransaction {
@@ -78,6 +94,12 @@ impl DbTransaction {
         self.insert(DbKeyValuePair::UnspentOutput(hash, Box::new(utxo)));
     }
 
+    /// Adds a UTXO into the current transaction and update the TXO MMR. This is a test only function used to ensure we
+    /// block duplicate entries. This function does not calculate the hash function but accepts one as a variable.
+    pub fn insert_utxo_with_hash(&mut self, hash: Vec<u8>, utxo: TransactionOutput) {
+        self.insert(DbKeyValuePair::UnspentOutput(hash, Box::new(utxo)));
+    }
+
     /// Stores an orphan block. No checks are made as to whether this is actually an orphan. That responsibility lies
     /// with the calling function.
     pub fn insert_orphan(&mut self, orphan: Block) {
@@ -113,8 +135,6 @@ impl DbTransaction {
     /// the database.
     pub fn commit_block(&mut self) {
         self.operations
-            .push(WriteOperation::CreateMmrCheckpoint(MmrTree::Header));
-        self.operations
             .push(WriteOperation::CreateMmrCheckpoint(MmrTree::Kernel));
         self.operations.push(WriteOperation::CreateMmrCheckpoint(MmrTree::Utxo));
         self.operations
@@ -131,12 +151,6 @@ impl DbTransaction {
             MetadataKey::PruningHorizon,
             MetadataValue::PruningHorizon(new_pruning_horizon),
         )));
-    }
-
-    /// Rewinds the Header MMR state by the given number of Checkpoints.
-    pub fn rewind_header_mmr(&mut self, steps_back: usize) {
-        self.operations
-            .push(WriteOperation::RewindMmr(MmrTree::Header, steps_back));
     }
 
     /// Rewinds the Kernel MMR state by the given number of Checkpoints.
@@ -156,9 +170,19 @@ impl DbTransaction {
         self.operations
             .push(WriteOperation::RewindMmr(MmrTree::RangeProof, steps_back));
     }
+
+    /// Merge checkpoints to ensure that only a specific number of checkpoints remain.
+    pub fn merge_checkpoints(&mut self, max_cp_count: usize) {
+        self.operations
+            .push(WriteOperation::MergeMmrCheckpoints(MmrTree::Kernel, max_cp_count));
+        self.operations
+            .push(WriteOperation::MergeMmrCheckpoints(MmrTree::Utxo, max_cp_count));
+        self.operations
+            .push(WriteOperation::MergeMmrCheckpoints(MmrTree::RangeProof, max_cp_count));
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Display)]
 pub enum WriteOperation {
     Insert(DbKeyValuePair),
     Delete(DbKey),
@@ -166,6 +190,7 @@ pub enum WriteOperation {
     UnSpend(DbKey),
     CreateMmrCheckpoint(MmrTree),
     RewindMmr(MmrTree, usize),
+    MergeMmrCheckpoints(MmrTree, usize),
 }
 
 /// A list of key-value pairs that are required for each insert operation
@@ -183,7 +208,6 @@ pub enum MmrTree {
     Utxo,
     Kernel,
     RangeProof,
-    Header,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,11 +218,11 @@ pub enum MetadataKey {
     PruningHorizon,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum MetadataValue {
     ChainHeight(Option<u64>),
     BestBlock(Option<BlockHash>),
-    AccumulatedWork(u64),
+    AccumulatedWork(Option<Difficulty>),
     PruningHorizon(u64),
 }
 
@@ -264,7 +288,19 @@ impl Display for MmrTree {
             MmrTree::RangeProof => f.write_str("Range Proof"),
             MmrTree::Utxo => f.write_str("UTXO"),
             MmrTree::Kernel => f.write_str("Kernel"),
-            MmrTree::Header => f.write_str("Block header"),
+        }
+    }
+}
+
+impl TryFrom<i32> for MmrTree {
+    type Error = String;
+
+    fn try_from(v: i32) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(MmrTree::Utxo),
+            1 => Ok(MmrTree::Kernel),
+            2 => Ok(MmrTree::RangeProof),
+            _ => Err("Invalid MmrTree".into()),
         }
     }
 }

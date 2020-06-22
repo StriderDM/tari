@@ -22,7 +22,6 @@
 
 mod future;
 mod lazy_service;
-
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
@@ -39,7 +38,10 @@ macro_rules! acquire_lock {
     ($e:expr, $m:ident) => {
         match $e.$m() {
             Ok(lock) => lock,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(poisoned) => {
+                log::warn!(target: "service_framework", "Lock has been POISONED and will be silently recovered");
+                poisoned.into_inner()
+            },
         }
     };
     ($e:expr) => {
@@ -48,6 +50,7 @@ macro_rules! acquire_lock {
 }
 
 /// Simple collection for named handles
+#[derive(Default)]
 pub struct ServiceHandles {
     handles: Mutex<HashMap<TypeId, Box<dyn Any + Sync + Send>>>,
 }
@@ -70,15 +73,15 @@ impl ServiceHandles {
     /// If the item does not exist or the downcast fails, `None` is returned.
     pub fn get_handle<H>(&self) -> Option<H>
     where H: Clone + 'static {
-        self.get_handle_by_type_id(&TypeId::of::<H>())
+        self.get_handle_by_type_id(TypeId::of::<H>())
     }
 
     /// Get a ServiceHandle by name and downcast it to a type `H`. If the item
     /// does not exist or the downcast fails, `None` is returned.
-    pub fn get_handle_by_type_id<H>(&self, type_id: &TypeId) -> Option<H>
+    pub fn get_handle_by_type_id<H>(&self, type_id: TypeId) -> Option<H>
     where H: Clone + 'static {
         acquire_lock!(self.handles)
-            .get(type_id)
+            .get(&type_id)
             .and_then(|b| b.downcast_ref::<H>())
             .map(Clone::clone)
     }

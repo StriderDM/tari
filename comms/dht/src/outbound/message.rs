@@ -21,13 +21,19 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
-    broadcast_strategy::BroadcastStrategy,
-    envelope::{DhtMessageFlags, DhtMessageHeader, NodeDestination},
-    proto::envelope::DhtMessageType,
+    envelope::{DhtMessageFlags, DhtMessageHeader, DhtMessageType, Network, NodeDestination},
+    outbound::{message_params::FinalSendMessageParams, message_send_state::MessageSendStates},
 };
+use bytes::Bytes;
 use futures::channel::oneshot;
-use std::fmt;
-use tari_comms::{message::MessageFlags, peer_manager::Peer, types::CommsPublicKey};
+use std::{fmt, fmt::Display, sync::Arc};
+use tari_comms::{
+    message::{MessageTag, MessagingReplyTx},
+    peer_manager::NodeId,
+    types::CommsPublicKey,
+};
+use tari_utilities::hex::Hex;
+use thiserror::Error;
 
 /// Determines if an outbound message should be Encrypted and, if so, for which public key
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,19 +41,33 @@ pub enum OutboundEncryption {
     /// Message should not be encrypted
     None,
     /// Message should be encrypted using a shared secret derived from the given public key
-    EncryptFor(CommsPublicKey),
-    /// Message should be encrypted using a shared secret derived from the destination peer's
-    /// public key. Each message sent according to the broadcast strategy will be encrypted for
-    /// the destination peer.
-    EncryptForDestination,
+    EncryptFor(Box<CommsPublicKey>),
 }
 
 impl OutboundEncryption {
     /// Return the correct DHT flags for the encryption setting
     pub fn flags(&self) -> DhtMessageFlags {
         match self {
-            OutboundEncryption::EncryptFor(_) | OutboundEncryption::EncryptForDestination => DhtMessageFlags::ENCRYPTED,
+            OutboundEncryption::EncryptFor(_) => DhtMessageFlags::ENCRYPTED,
             _ => DhtMessageFlags::NONE,
+        }
+    }
+
+    /// Returns true if encryption is turned on, otherwise false
+    pub fn is_encrypt(&self) -> bool {
+        use OutboundEncryption::*;
+        match self {
+            None => false,
+            EncryptFor(_) => true,
+        }
+    }
+}
+
+impl Display for OutboundEncryption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        match self {
+            OutboundEncryption::None => write!(f, "None"),
+            OutboundEncryption::EncryptFor(ref key) => write!(f, "EncryptFor:{}", key.to_hex()),
         }
     }
 }
@@ -58,81 +78,148 @@ impl Default for OutboundEncryption {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SendMessageRequest {
-    /// Broadcast strategy to use when sending the message
-    pub broadcast_strategy: BroadcastStrategy,
-    /// The intended destination for this message
-    pub destination: NodeDestination,
-    /// Encryption setting for message
-    pub encryption: OutboundEncryption,
-    /// Comms-level message flags
-    pub comms_flags: MessageFlags,
-    /// Dht-level message flags
-    pub dht_flags: DhtMessageFlags,
-    /// Dht-level message type (`DhtMessageType::None` for a non-DHT message)
-    pub dht_message_type: DhtMessageType,
-    /// Message body
-    pub body: Vec<u8>,
+#[derive(Debug, Error)]
+pub enum SendFailure {
+    #[error("Attempt to send message to ourselves")]
+    SendToOurselves,
+    #[error("Discovery reply channel cancelled")]
+    SenderCancelled,
+    #[error("Failure when sending: {0}")]
+    General(String),
+    #[error("Discovery failed")]
+    DiscoveryFailed,
+    #[error("Failure when generating messages: {0}")]
+    FailedToGenerateMessages(String),
+    #[error("No messages were queued for sending")]
+    NoMessagesQueued,
 }
 
-#[derive(Debug, Clone)]
-pub struct ForwardRequest {
-    /// Broadcast strategy to use when forwarding the message
-    pub broadcast_strategy: BroadcastStrategy,
-    /// Original header from the origin
-    pub dht_header: DhtMessageHeader,
-    /// Comms-level message flags
-    pub comms_flags: MessageFlags,
-    /// Message body
-    pub body: Vec<u8>,
+#[derive(Debug)]
+pub enum SendMessageResponse {
+    /// Returns the message tags which are queued for sending. These tags will be used in a subsequent OutboundEvent to
+    /// indicate if the message succeeded/failed to send
+    Queued(MessageSendStates),
+    /// A failure occurred when sending
+    Failed(SendFailure),
+    /// DHT Discovery has been initiated. The caller may wait on the receiver
+    /// to find out of the message was sent.
+    /// _NOTE: DHT discovery could take minutes (determined by `DhtConfig::discovery_request_timeout)_
+    PendingDiscovery(oneshot::Receiver<SendMessageResponse>),
+}
+
+impl SendMessageResponse {
+    /// Returns the result of a send message request.
+    /// A `SendMessageResponse::Queued(n)` will resolve immediately returning `Ok(n)` or
+    /// `Err(SendFailure::NoMessagesSent)`. A `SendMessageResponse::Failed` will resolve immediately returning a
+    /// `Err(SendFailure)`. If DHT discovery is initiated, this will resolve once discovery has completed, either
+    /// succeeding or failing.
+    pub async fn resolve(self) -> Result<MessageSendStates, SendFailure> {
+        use SendMessageResponse::*;
+        match self {
+            Queued(send_states) if !send_states.is_empty() => Ok(send_states),
+            Queued(_) => Err(SendFailure::NoMessagesQueued),
+            Failed(err) => Err(err),
+            PendingDiscovery(rx) => rx.await.map_err(|_| SendFailure::SenderCancelled)?.queued_or_failed(),
+        }
+    }
+
+    fn queued_or_failed(self) -> Result<MessageSendStates, SendFailure> {
+        use SendMessageResponse::*;
+        match self {
+            Queued(send_states) if !send_states.is_empty() => Ok(send_states),
+            Queued(_) => Err(SendFailure::NoMessagesQueued),
+            Failed(err) => Err(err),
+            PendingDiscovery(_) => panic!("ok_or_failed() called on PendingDiscovery"),
+        }
+    }
 }
 
 /// Represents a request to the DHT broadcast middleware
 #[derive(Debug)]
 pub enum DhtOutboundRequest {
     /// Send a message using the given broadcast strategy
-    SendMsg(Box<SendMessageRequest>, oneshot::Sender<usize>),
-    /// Forward a message envelope
-    Forward(Box<ForwardRequest>),
+    SendMessage(Box<FinalSendMessageParams>, Bytes, oneshot::Sender<SendMessageResponse>),
 }
 
 impl fmt::Display for DhtOutboundRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
-            DhtOutboundRequest::SendMsg(request, _) => write!(f, "SendMsg({})", request.broadcast_strategy),
-            DhtOutboundRequest::Forward(request) => write!(f, "Forward({})", request.broadcast_strategy),
+            DhtOutboundRequest::SendMessage(params, body, _) => {
+                write!(f, "SendMsg({} - <{} bytes>)", params.broadcast_strategy, body.len())
+            },
+        }
+    }
+}
+
+/// Wrapper struct for a oneshot reply sender. When this struct is dropped, an automatic fail is sent on the oneshot if
+/// a response has not already been sent.
+#[derive(Debug)]
+pub struct WrappedReplyTx(Option<MessagingReplyTx>);
+
+impl WrappedReplyTx {
+    pub fn into_inner(mut self) -> Option<MessagingReplyTx> {
+        self.0.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn none() -> Self {
+        Self(None)
+    }
+}
+
+impl From<MessagingReplyTx> for WrappedReplyTx {
+    fn from(inner: MessagingReplyTx) -> Self {
+        Self(Some(inner))
+    }
+}
+
+impl Drop for WrappedReplyTx {
+    fn drop(&mut self) {
+        // If this is dropped and the reply tx has not been used already, send an error reply
+        if let Some(reply_tx) = self.0.take() {
+            let _ = reply_tx.send(Err(()));
         }
     }
 }
 
 /// DhtOutboundMessage consists of the DHT and comms information required to
 /// send a message
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DhtOutboundMessage {
-    pub destination_peer: Peer,
-    pub dht_header: DhtMessageHeader,
-    pub comms_flags: MessageFlags,
-    pub encryption: OutboundEncryption,
-    pub body: Vec<u8>,
+    pub tag: MessageTag,
+    pub destination_node_id: NodeId,
+    pub custom_header: Option<DhtMessageHeader>,
+    pub body: Bytes,
+    pub ephemeral_public_key: Option<Arc<CommsPublicKey>>,
+    pub origin_mac: Option<Bytes>,
+    pub destination: NodeDestination,
+    pub dht_message_type: DhtMessageType,
+    pub reply_tx: WrappedReplyTx,
+    pub network: Network,
+    pub dht_flags: DhtMessageFlags,
+    pub is_broadcast: bool,
 }
 
-impl DhtOutboundMessage {
-    /// Create a new DhtOutboundMessage
-    pub fn new(
-        destination_peer: Peer,
-        dht_header: DhtMessageHeader,
-        encryption: OutboundEncryption,
-        comms_flags: MessageFlags,
-        body: Vec<u8>,
-    ) -> Self
-    {
-        Self {
-            destination_peer,
-            dht_header,
-            encryption,
-            comms_flags,
-            body,
-        }
+impl fmt::Display for DhtOutboundMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        let header_str = self
+            .custom_header
+            .as_ref()
+            .map(|h| format!("{} (Propagated)", h))
+            .unwrap_or_else(|| {
+                format!(
+                    "Network: {:?}, Flags: {:?}, Destination: {}, Trace: {}",
+                    self.network, self.dht_flags, self.destination, self.tag,
+                )
+            });
+        write!(
+            f,
+            "\n---- Outgoing message ---- \nSize: {} byte(s)\nType: {}\nPeer: {}\nHeader: {}\n{}\n----",
+            self.body.len(),
+            self.dht_message_type,
+            self.destination_node_id,
+            header_str,
+            self.tag,
+        )
     }
 }

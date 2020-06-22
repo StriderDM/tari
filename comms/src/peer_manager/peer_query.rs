@@ -20,11 +20,11 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::peer_manager::{peer_key::PeerKey, NodeId, Peer, PeerManagerError};
+use crate::peer_manager::{peer_id::PeerId, NodeId, Peer, PeerManagerError};
 use std::cmp::min;
 use tari_storage::{IterationResult, KeyValueStore};
 
-type Predicate<'a> = Box<dyn FnMut(&Peer) -> bool + 'a>;
+type Predicate<'a, A> = Box<dyn FnMut(&A) -> bool + Send + 'a>;
 
 /// Sort options for `PeerQuery`
 #[derive(Debug, Clone)]
@@ -44,9 +44,10 @@ impl Default for PeerQuerySortBy<'_> {
 /// Represents a query which can be performed on the peer database
 #[derive(Default)]
 pub struct PeerQuery<'a> {
-    select_predicate: Option<Predicate<'a>>,
+    select_predicate: Option<Predicate<'a, Peer>>,
     limit: Option<usize>,
     sort_by: PeerQuerySortBy<'a>,
+    until_predicate: Option<Predicate<'a, [Peer]>>,
 }
 
 impl<'a> PeerQuery<'a> {
@@ -58,7 +59,7 @@ impl<'a> PeerQuery<'a> {
     /// Set the selection predicate. This predicate should return `true` to include a `Peer`
     /// in the result set.
     pub fn select_where<F>(mut self, select_predicate: F) -> Self
-    where F: FnMut(&Peer) -> bool + 'a {
+    where F: FnMut(&Peer) -> bool + Send + 'a {
         self.select_predicate = Some(Box::new(select_predicate));
         self
     }
@@ -75,9 +76,15 @@ impl<'a> PeerQuery<'a> {
         self
     }
 
+    pub fn until<F>(mut self, until_predicate: F) -> Self
+    where F: FnMut(&[Peer]) -> bool + Send + 'a {
+        self.until_predicate = Some(Box::new(until_predicate));
+        self
+    }
+
     /// Returns a `PeerQueryExecutor` with this `PeerQuery`
     pub(super) fn executor<DS>(self, store: &DS) -> PeerQueryExecutor<'a, '_, DS>
-    where DS: KeyValueStore<PeerKey, Peer> {
+    where DS: KeyValueStore<PeerId, Peer> {
         PeerQueryExecutor::new(self, store)
     }
 
@@ -95,6 +102,14 @@ impl<'a> PeerQuery<'a> {
             .map(|predicate| (predicate)(peer))
             .unwrap_or(true)
     }
+
+    /// Returns true if the result collector should stop early, otherwise false
+    fn should_stop(&mut self, peers: &[Peer]) -> bool {
+        self.until_predicate
+            .as_mut()
+            .map(|predicate| (predicate)(peers))
+            .unwrap_or(false)
+    }
 }
 
 /// This struct executes the query using the given store
@@ -104,7 +119,7 @@ pub(super) struct PeerQueryExecutor<'a, 'b, DS> {
 }
 
 impl<'a, 'b, DS> PeerQueryExecutor<'a, 'b, DS>
-where DS: KeyValueStore<PeerKey, Peer>
+where DS: KeyValueStore<PeerId, Peer>
 {
     pub fn new(query: PeerQuery<'a>, store: &'b DS) -> Self {
         Self { query, store }
@@ -136,7 +151,7 @@ where DS: KeyValueStore<PeerKey, Peer>
             .query
             .limit
             .map(|limit| min(peer_keys.len(), limit))
-            .unwrap_or(peer_keys.len());
+            .unwrap_or_else(|| peer_keys.len());
         if max_available == 0 {
             return Ok(Vec::new());
         }
@@ -157,6 +172,10 @@ where DS: KeyValueStore<PeerKey, Peer>
                 .ok_or(PeerManagerError::PeerNotFoundError)?;
 
             selected_peers.push(peer);
+
+            if self.query.should_stop(&selected_peers) {
+                break;
+            }
         }
 
         Ok(selected_peers)
@@ -170,7 +189,7 @@ where DS: KeyValueStore<PeerKey, Peer>
 
         self.store
             .for_each_ok(|(_, peer)| {
-                if self.query.within_limit(selected_peers.len()) {
+                if self.query.within_limit(selected_peers.len()) && !self.query.should_stop(&selected_peers) {
                     if self.query.is_selected(&peer) {
                         selected_peers.push(peer);
                     }
@@ -190,30 +209,34 @@ where DS: KeyValueStore<PeerKey, Peer>
 mod test {
     use super::*;
     use crate::{
-        connection::net_address::{net_addresses::NetAddressesWithStats, NetAddress},
+        net_address::MultiaddressesWithStats,
         peer_manager::{
             node_id::NodeId,
             peer::{Peer, PeerFlags},
             PeerFeatures,
         },
     };
-    use rand::OsRng;
-    use std::iter::repeat_with;
+    use multiaddr::Multiaddr;
+    use rand::rngs::OsRng;
+    use std::{iter::repeat_with, time::Duration};
     use tari_crypto::{keys::PublicKey, ristretto::RistrettoPublicKey};
-    use tari_storage::HMapDatabase;
+    use tari_storage::HashmapDatabase;
 
-    fn create_test_peer(rng: &mut OsRng, ban_flag: bool) -> Peer {
-        let (_sk, pk) = RistrettoPublicKey::random_keypair(rng);
+    fn create_test_peer(ban_flag: bool) -> Peer {
+        let (_sk, pk) = RistrettoPublicKey::random_keypair(&mut OsRng);
         let node_id = NodeId::from_key(&pk).unwrap();
-        let net_addresses = NetAddressesWithStats::from("1.2.3.4:8000".parse::<NetAddress>().unwrap());
+        let net_addresses = MultiaddressesWithStats::from("/ip4/1.2.3.4/tcp/8000".parse::<Multiaddr>().unwrap());
         let mut peer = Peer::new(
             pk,
             node_id,
             net_addresses,
             PeerFlags::default(),
             PeerFeatures::MESSAGE_PROPAGATION,
+            &[],
         );
-        peer.set_banned(ban_flag);
+        if ban_flag {
+            peer.ban_for(Duration::from_secs(1000));
+        }
         peer
     }
 
@@ -222,17 +245,14 @@ mod test {
         // Create peer manager with random peers
         let mut sample_peers = Vec::new();
         // Create 20 peers were the 1st and last one is bad
-        let mut rng = rand::OsRng::new().unwrap();
-        sample_peers.push(create_test_peer(&mut rng, true));
-        let db = HMapDatabase::new();
+        sample_peers.push(create_test_peer(true));
+        let db = HashmapDatabase::new();
         let mut id_counter = 0;
 
-        repeat_with(|| create_test_peer(&mut rng, false))
-            .take(5)
-            .for_each(|peer| {
-                db.insert(id_counter, peer).unwrap();
-                id_counter += 1;
-            });
+        repeat_with(|| create_test_peer(false)).take(5).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
 
         let peers = PeerQuery::new().limit(4).executor(&db).get_results().unwrap();
 
@@ -244,24 +264,20 @@ mod test {
         // Create peer manager with random peers
         let mut sample_peers = Vec::new();
         // Create 20 peers were the 1st and last one is bad
-        let mut rng = rand::OsRng::new().unwrap();
-        sample_peers.push(create_test_peer(&mut rng, true));
-        let db = HMapDatabase::new();
+        let _rng = rand::rngs::OsRng;
+        sample_peers.push(create_test_peer(true));
+        let db = HashmapDatabase::new();
         let mut id_counter = 0;
 
-        repeat_with(|| create_test_peer(&mut rng, true))
-            .take(2)
-            .for_each(|peer| {
-                db.insert(id_counter, peer).unwrap();
-                id_counter += 1;
-            });
+        repeat_with(|| create_test_peer(true)).take(2).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
 
-        repeat_with(|| create_test_peer(&mut rng, false))
-            .take(5)
-            .for_each(|peer| {
-                db.insert(id_counter, peer).unwrap();
-                id_counter += 1;
-            });
+        repeat_with(|| create_test_peer(false)).take(5).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
 
         let peers = PeerQuery::new()
             .select_where(|peer| !peer.is_banned())
@@ -278,24 +294,20 @@ mod test {
         // Create peer manager with random peers
         let mut sample_peers = Vec::new();
         // Create 20 peers were the 1st and last one is bad
-        let mut rng = rand::OsRng::new().unwrap();
-        sample_peers.push(create_test_peer(&mut rng, true));
-        let db = HMapDatabase::new();
+        let _rng = rand::rngs::OsRng;
+        sample_peers.push(create_test_peer(true));
+        let db = HashmapDatabase::new();
         let mut id_counter = 0;
 
-        repeat_with(|| create_test_peer(&mut rng, true))
-            .take(3)
-            .for_each(|peer| {
-                db.insert(id_counter, peer).unwrap();
-                id_counter += 1;
-            });
+        repeat_with(|| create_test_peer(true)).take(3).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
 
-        repeat_with(|| create_test_peer(&mut rng, false))
-            .take(5)
-            .for_each(|peer| {
-                db.insert(id_counter, peer).unwrap();
-                id_counter += 1;
-            });
+        repeat_with(|| create_test_peer(false)).take(5).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
 
         let peers = PeerQuery::new()
             .select_where(|peer| peer.is_banned())
@@ -306,6 +318,55 @@ mod test {
 
         assert_eq!(peers.len(), 2);
         assert!(peers.iter().all(|peer| peer.is_banned()));
+
+        let peers = PeerQuery::new()
+            .select_where(|peer| !peer.is_banned())
+            .limit(100)
+            .executor(&db)
+            .get_results()
+            .unwrap();
+
+        assert_eq!(peers.len(), 5);
+        assert!(peers.iter().all(|peer| !peer.is_banned()));
+    }
+
+    #[test]
+    fn select_where_until_query() {
+        // Create peer manager with random peers
+        let mut sample_peers = Vec::new();
+        // Create 20 peers were the 1st and last one is bad
+        let _rng = rand::rngs::OsRng;
+        sample_peers.push(create_test_peer(true));
+        let db = HashmapDatabase::new();
+        let mut id_counter = 0;
+
+        repeat_with(|| create_test_peer(true)).take(3).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
+
+        repeat_with(|| create_test_peer(false)).take(5).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
+
+        let peers = PeerQuery::new()
+            .select_where(|peer| !peer.is_banned())
+            .until(|peers| peers.len() == 2)
+            .executor(&db)
+            .get_results()
+            .unwrap();
+
+        assert_eq!(peers.len(), 2);
+        assert!(peers.iter().all(|peer| !peer.is_banned()));
+
+        let peers = PeerQuery::new()
+            .until(|peers| peers.len() == 100)
+            .executor(&db)
+            .get_results()
+            .unwrap();
+
+        assert_eq!(peers.len(), 8);
     }
 
     #[test]
@@ -313,24 +374,20 @@ mod test {
         // Create peer manager with random peers
         let mut sample_peers = Vec::new();
         // Create 20 peers were the 1st and last one is bad
-        let mut rng = rand::OsRng::new().unwrap();
-        sample_peers.push(create_test_peer(&mut rng, true));
-        let db = HMapDatabase::new();
+        let _rng = rand::rngs::OsRng;
+        sample_peers.push(create_test_peer(true));
+        let db = HashmapDatabase::new();
         let mut id_counter = 0;
 
-        repeat_with(|| create_test_peer(&mut rng, true))
-            .take(3)
-            .for_each(|peer| {
-                db.insert(id_counter, peer).unwrap();
-                id_counter += 1;
-            });
+        repeat_with(|| create_test_peer(true)).take(3).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
 
-        repeat_with(|| create_test_peer(&mut rng, false))
-            .take(5)
-            .for_each(|peer| {
-                db.insert(id_counter, peer).unwrap();
-                id_counter += 1;
-            });
+        repeat_with(|| create_test_peer(false)).take(5).for_each(|peer| {
+            db.insert(id_counter, peer).unwrap();
+            id_counter += 1;
+        });
 
         let node_id = NodeId::default();
 
@@ -346,7 +403,7 @@ mod test {
         db.for_each_ok(|(_, current_peer)| {
             // Exclude selected peers
             if !peers.contains(&current_peer) {
-                // Every selected peer's distance from node_id is less than every other peer's distance from node_id
+                // Every selected peer'a distance from node_id is less than every other peer'a distance from node_id
                 for selected_peer in &peers {
                     assert!(selected_peer.node_id.distance(&node_id) <= current_peer.node_id.distance(&node_id));
                 }

@@ -26,13 +26,6 @@
 // Tracking issue: https://github.com/rust-lang/rust/issues/63063
 #![feature(type_alias_impl_trait)]
 
-use rand::rngs::OsRng;
-use std::cell::RefCell;
-
-thread_local! {
-    pub(crate) static THREAD_RNG: RefCell<OsRng> = RefCell::new(OsRng::new().expect("OsRng failed"));
-}
-
 #[cfg(test)]
 #[macro_use]
 mod test_utils;
@@ -44,3 +37,4 @@ pub mod peer;
 pub mod proto;
 pub mod services;
 pub mod tari_message;
+pub mod transport;

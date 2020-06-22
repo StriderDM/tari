@@ -50,7 +50,7 @@ use tari_p2p::{
 use tari_service_framework::reply_channel;
 use tokio_executor::threadpool::blocking;
 
-const LOG_TARGET: &'static str = "base_layer::wallet::text_messsage_service";
+const LOG_TARGET: &str = "wallet::text_messsage_service";
 
 /// Represents an Acknowledgement of receiving a Text Message
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,7 +169,6 @@ where
         let connection = SqliteConnection::establish(&database_path)?;
 
         connection.execute("PRAGMA foreign_keys = ON")?;
-        println!("establish DB? {:?} PAth: {:?}", db_exists, database_path);
         if !db_exists {
             embed_migrations!("./migrations");
             embedded_migrations::run_with_output(&connection, &mut io::stdout()).map_err(|err| {
@@ -182,6 +181,7 @@ where
         let pool = diesel::r2d2::Pool::builder()
             .connection_timeout(Duration::from_millis(2000))
             .idle_timeout(Some(Duration::from_millis(2000)))
+            .max_size(1)
             .build(manager)
             .map_err(|_| TextMessageError::R2d2Error)?;
         Ok(pool)
@@ -287,10 +287,18 @@ where
         let message_inner = message.clone().into_inner();
         poll_fn(move |_| blocking(|| message_inner.commit(&conn))).await??;
 
-        self.event_publisher
+        let _ = self
+            .event_publisher
             .send(TextMessageEvent::ReceivedTextMessage)
             .await
-            .map_err(|_| TextMessageError::EventStreamError)?;
+            .map_err(|e| {
+                trace!(
+                    target: LOG_TARGET,
+                    "Error sending event, usually because there are no subscribers: {:?}",
+                    e
+                );
+                e
+            });
 
         Ok(())
     }
@@ -315,10 +323,18 @@ where
         );
 
         poll_fn(move |_| blocking(|| SentTextMessage::mark_sent_message_ack(&message_ack_inner.id, &conn))).await??;
-        self.event_publisher
+        let _ = self
+            .event_publisher
             .send(TextMessageEvent::ReceivedTextMessageAck)
             .await
-            .map_err(|_| TextMessageError::EventStreamError)?;
+            .map_err(|e| {
+                trace!(
+                    target: LOG_TARGET,
+                    "Error sending event, usually because there are no subscribers: {:?}",
+                    e
+                );
+                e
+            });
         Ok(())
     }
 

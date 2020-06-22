@@ -20,5 +20,27 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-pub mod dialers;
+#[allow(dead_code)]
+#[cfg(test)]
+pub mod factories;
+
+cfg_test! {
+    pub mod test_node;
+}
+
+pub mod mocks;
 pub mod node_id;
+pub mod node_identity;
+pub mod transport;
+
+pub fn count_string_occurrences<T, U>(items: T, expected: &[&str]) -> usize
+where
+    T: AsRef<[U]>,
+    U: ToString,
+{
+    items
+        .as_ref()
+        .iter()
+        .filter(|event| expected.iter().any(|exp| event.to_string().contains(exp)))
+        .count()
+}

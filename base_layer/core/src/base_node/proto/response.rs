@@ -20,21 +20,24 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+pub use super::base_node::base_node_service_response::Response as ProtoNodeCommsResponse;
 use super::base_node::{
     BlockHeaders as ProtoBlockHeaders,
     HistoricalBlocks as ProtoHistoricalBlocks,
+    MmrNodes as ProtoMmrNodes,
     TransactionKernels as ProtoTransactionKernels,
     TransactionOutputs as ProtoTransactionOutputs,
 };
-use crate::{base_node::comms_interface as ci, proto::core as core_proto_types};
+use crate::{
+    base_node::comms_interface as ci,
+    proof_of_work::Difficulty,
+    proto::core as core_proto_types,
+    transactions::proto::{types as transactions_proto, utils::try_convert_all},
+};
 use std::{
     convert::TryInto,
     iter::{FromIterator, Iterator},
 };
-use tari_transactions::proto::types as transactions_proto;
-
-pub use super::base_node::base_node_service_response::Response as ProtoNodeCommsResponse;
-use tari_transactions::proto::utils::try_convert_all;
 
 impl TryInto<ci::NodeCommsResponse> for ProtoNodeCommsResponse {
     type Error = String;
@@ -51,6 +54,10 @@ impl TryInto<ci::NodeCommsResponse> for ProtoNodeCommsResponse {
                 let headers = try_convert_all(headers.headers)?;
                 ci::NodeCommsResponse::BlockHeaders(headers)
             },
+            FetchHeadersAfterResponse(headers) => {
+                let headers = try_convert_all(headers.headers)?;
+                ci::NodeCommsResponse::FetchHeadersAfterResponse(headers)
+            },
             TransactionOutputs(outputs) => {
                 let outputs = try_convert_all(outputs.outputs)?;
                 ci::NodeCommsResponse::TransactionOutputs(outputs)
@@ -59,8 +66,11 @@ impl TryInto<ci::NodeCommsResponse> for ProtoNodeCommsResponse {
                 let blocks = try_convert_all(blocks.blocks)?;
                 ci::NodeCommsResponse::HistoricalBlocks(blocks)
             },
-            MmrState(state) => ci::NodeCommsResponse::MmrState(state.try_into()?),
+            NewBlockTemplate(block_template) => ci::NodeCommsResponse::NewBlockTemplate(block_template.try_into()?),
             NewBlock(block) => ci::NodeCommsResponse::NewBlock(block.try_into()?),
+            TargetDifficulty(difficulty) => ci::NodeCommsResponse::TargetDifficulty(Difficulty::from(difficulty)),
+            MmrNodeCount(u64) => ci::NodeCommsResponse::MmrNodeCount(u64),
+            MmrNodes(response) => ci::NodeCommsResponse::MmrNodes(response.added, response.deleted),
         };
 
         Ok(response)
@@ -80,6 +90,10 @@ impl From<ci::NodeCommsResponse> for ProtoNodeCommsResponse {
                 let block_headers = headers.into_iter().map(Into::into).collect();
                 ProtoNodeCommsResponse::BlockHeaders(block_headers)
             },
+            FetchHeadersAfterResponse(headers) => {
+                let block_headers = headers.into_iter().map(Into::into).collect();
+                ProtoNodeCommsResponse::FetchHeadersAfterResponse(block_headers)
+            },
             TransactionOutputs(outputs) => {
                 let outputs = outputs.into_iter().map(Into::into).collect();
                 ProtoNodeCommsResponse::TransactionOutputs(outputs)
@@ -88,8 +102,11 @@ impl From<ci::NodeCommsResponse> for ProtoNodeCommsResponse {
                 let historical_blocks = historical_blocks.into_iter().map(Into::into).collect();
                 ProtoNodeCommsResponse::HistoricalBlocks(historical_blocks)
             },
-            MmrState(state) => ProtoNodeCommsResponse::MmrState(state.into()),
+            NewBlockTemplate(block_template) => ProtoNodeCommsResponse::NewBlockTemplate(block_template.into()),
             NewBlock(block) => ProtoNodeCommsResponse::NewBlock(block.into()),
+            TargetDifficulty(difficulty) => ProtoNodeCommsResponse::TargetDifficulty(difficulty.as_u64()),
+            MmrNodeCount(node_count) => ProtoNodeCommsResponse::MmrNodeCount(node_count),
+            MmrNodes(added, deleted) => ProtoNodeCommsResponse::MmrNodes(ProtoMmrNodes { added, deleted }),
         }
     }
 }

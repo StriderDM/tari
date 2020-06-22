@@ -40,7 +40,7 @@
 //! # use std::sync::Arc;
 //! # use tari_storage::LMDBWrapper;
 //!
-//! let mut rng = rand::OsRng::new().unwrap();
+//! let mut rng = rand::rngs::OsRng;
 //! let (dest_sk, pk) = CommsPublicKey::random_keypair(&mut rng);
 //! let node_id = NodeId::from_key(&pk).unwrap();
 //! let net_addresses = NetAddressesWithStats::from("1.2.3.4:8000".parse::<NetAddress>().unwrap());
@@ -61,24 +61,31 @@
 //! let returned_peer = peer_manager.find_by_node_id(&node_id).unwrap();
 //! ```
 
-mod peer_features;
-
 mod connection_stats;
-mod error;
-pub mod node_id;
-pub mod node_identity;
-pub mod peer;
-pub mod peer_key;
-mod peer_manager;
-mod peer_query;
-pub mod peer_storage;
 
-pub use self::{
-    error::PeerManagerError,
-    node_id::NodeId,
-    node_identity::NodeIdentity,
-    peer::{Peer, PeerFlags},
-    peer_features::PeerFeatures,
-    peer_manager::PeerManager,
-    peer_query::{PeerQuery, PeerQuerySortBy},
-};
+mod error;
+pub use error::PeerManagerError;
+
+pub mod node_id;
+pub use node_id::NodeId;
+
+mod node_identity;
+pub use node_identity::{NodeIdentity, NodeIdentityError};
+
+mod peer;
+pub use peer::{Peer, PeerFlags};
+
+mod peer_features;
+pub use peer_features::PeerFeatures;
+
+mod peer_id;
+pub use peer_id::PeerId;
+
+mod manager;
+pub use manager::PeerManager;
+
+mod peer_query;
+pub use peer_query::{PeerQuery, PeerQuerySortBy};
+
+mod peer_storage;
+pub use peer_storage::PeerStorage;

@@ -23,6 +23,7 @@
 use std::{collections::HashMap, hash::Hash};
 
 #[allow(dead_code)]
+#[allow(clippy::mutable_key_type)] // Note: Clippy Breaks with Interior Mutability Error
 pub fn get_item_counts<I>(items: I) -> HashMap<I::Item, usize>
 where
     I: IntoIterator,
@@ -35,7 +36,9 @@ where
     })
 }
 
-/// Collect $take items from a stream or timeout for Duration $timeout. Requires the `tokio` runtime
+/// Collect $take items from a stream or timeout for Duration $timeout.
+///
+/// Requires the `tokio` runtime and should be used in an async context.
 ///
 /// ```edition2018
 /// # use tokio::runtime::Runtime;
@@ -43,27 +46,50 @@ where
 /// # use std::time::Duration;
 /// # use tari_test_utils::collect_stream;
 ///
-/// let rt = Runtime::new().unwrap();
-/// let stream = stream::iter(1..10);
-/// assert_eq!(collect_stream!(rt, stream, take=3, timeout=Duration::from_secs(1)), vec![1,2,3]);
+/// let mut rt = Runtime::new().unwrap();
+/// let mut stream = stream::iter(1..10);
+/// assert_eq!(rt.block_on(async { collect_stream!(stream, take=3, timeout=Duration::from_secs(1)) }), vec![1,2,3]);
 /// ```
 #[macro_export]
 macro_rules! collect_stream {
-    ($runtime:expr, $stream:expr, take=$take:expr, timeout=$timeout:expr $(,)?) => {{
-        use futures::StreamExt as __FuturesStreamExt;
-        use tokio::future::FutureExt as __TokioFuturesExt;
+    ($stream:expr, take=$take:expr, timeout=$timeout:expr $(,)?) => {{
+        use futures::{Stream, StreamExt};
+        use tokio::time;
 
-        $runtime
-            .block_on($stream.take($take).collect::<Vec<_>>().timeout($timeout))
-            .expect("Timeout before stream could collect $take item(s)")
+        // Evaluate $stream once, NOT in the loop 🐛🚨
+        let mut stream = &mut $stream;
+
+        let mut items = Vec::new();
+        loop {
+            if let Some(item) = time::timeout($timeout, stream.next()).await.expect(
+                format!(
+                    "Timeout before stream could collect {} item(s). Got {} item(s).",
+                    $take,
+                    items.len()
+                )
+                .as_str(),
+            ) {
+                items.push(item);
+                if items.len() == $take {
+                    break items;
+                }
+            } else {
+                break items;
+            }
+        }
     }};
-    ($runtime:expr, $stream:expr, timeout=$timeout:expr $(,)?) => {{
-        use futures::StreamExt as __FuturesStreamExt;
-        use tokio::future::FutureExt as __TokioFuturesExt;
+    ($stream:expr, timeout=$timeout:expr $(,)?) => {{
+        use futures::StreamExt;
+        use tokio::time;
 
-        $runtime
-            .block_on($stream.collect::<Vec<_>>().timeout($timeout))
-            .expect("Stream did not close within timeout")
+        let mut items = Vec::new();
+        while let Some(item) = time::timeout($timeout, $stream.next())
+            .await
+            .expect(format!("Timeout before stream was closed. Got {} items.", items.len()).as_str())
+        {
+            items.push(item);
+        }
+        items
     }};
 }
 
@@ -75,21 +101,21 @@ macro_rules! collect_stream {
 /// # use std::time::Duration;
 /// # use tari_test_utils::collect_stream_count;
 ///
-/// let rt = Runtime::new().unwrap();
-/// let stream = stream::iter(vec![1,2,2,3,2]);
-/// assert_eq!(collect_stream_count!(rt, stream, timeout=Duration::from_secs(1)).get(&2), Some(&3));
+/// let mut rt = Runtime::new().unwrap();
+/// let mut stream = stream::iter(vec![1,2,2,3,2]);
+/// assert_eq!(rt.block_on(async { collect_stream_count!(stream, timeout=Duration::from_secs(1)) }).get(&2), Some(&3));
 /// ```
 #[macro_export]
 macro_rules! collect_stream_count {
-    ($runtime:expr, $stream:expr, take=$take:expr, timeout=$timeout:expr$(,)?) => {{
+    ($stream:expr, take=$take:expr, timeout=$timeout:expr$(,)?) => {{
         use std::collections::HashMap;
-        let items = $crate::collect_stream!($runtime, $stream, take = $take, timeout = $timeout);
+        let items = $crate::collect_stream!($stream, take = $take, timeout = $timeout);
         $crate::streams::get_item_counts(items)
     }};
 
-    ($runtime:expr, $stream:expr, timeout=$timeout:expr $(,)?) => {{
+    ($stream:expr, timeout=$timeout:expr $(,)?) => {{
         use std::collections::HashMap;
-        let items = $crate::collect_stream!($runtime, $stream, timeout = $timeout);
+        let items = $crate::collect_stream!($stream, timeout = $timeout);
         $crate::streams::get_item_counts(items)
     }};
 }

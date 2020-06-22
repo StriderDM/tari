@@ -22,21 +22,26 @@
 
 use crate::{
     blocks::Block,
-    consts::{MEMPOOL_REORG_POOL_CACHE_TTL, MEMPOOL_REORG_POOL_STORAGE_CAPACITY},
-    mempool::reorg_pool::{ReorgPoolError, ReorgPoolStorage},
+    mempool::{
+        consts::{MEMPOOL_REORG_POOL_CACHE_TTL, MEMPOOL_REORG_POOL_STORAGE_CAPACITY},
+        reorg_pool::{ReorgPoolError, ReorgPoolStorage},
+    },
+    transactions::{transaction::Transaction, types::Signature},
 };
+use serde::{Deserialize, Serialize};
 use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tari_transactions::{transaction::Transaction, types::Signature};
+use tari_common::configuration::seconds;
 
 /// Configuration for the ReorgPool
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 pub struct ReorgPoolConfig {
     /// The maximum number of transactions that can be stored in the ReorgPool
     pub storage_capacity: usize,
     /// The Time-to-live for each stored transaction
+    #[serde(with = "seconds")]
     pub tx_ttl: Duration,
 }
 
@@ -55,25 +60,35 @@ impl Default for ReorgPoolConfig {
 /// from the pool when the Time-to-live thresholds is reached. Also, when the capacity of the pool has been reached, the
 /// oldest transactions will be removed to make space for incoming transactions.
 pub struct ReorgPool {
-    pool_storage: RwLock<ReorgPoolStorage>,
+    pool_storage: Arc<RwLock<ReorgPoolStorage>>,
 }
 
 impl ReorgPool {
     /// Create a new ReorgPool with the specified configuration
     pub fn new(config: ReorgPoolConfig) -> Self {
         Self {
-            pool_storage: RwLock::new(ReorgPoolStorage::new(config)),
+            pool_storage: Arc::new(RwLock::new(ReorgPoolStorage::new(config))),
         }
     }
 
     /// Insert a set of new transactions into the ReorgPool. Published transactions will have a limited Time-to-live in
     /// the ReorgPool and will be discarded once the Time-to-live threshold has been reached.
     pub fn insert_txs(&self, transactions: Vec<Arc<Transaction>>) -> Result<(), ReorgPoolError> {
-        Ok(self
-            .pool_storage
+        self.pool_storage
             .write()
-            .map_err(|_| ReorgPoolError::PoisonedAccess)?
-            .insert_txs(transactions))
+            .map_err(|e| ReorgPoolError::BackendError(e.to_string()))?
+            .insert_txs(transactions);
+        Ok(())
+    }
+
+    /// Insert a new transaction into the ReorgPool. Published transactions will have a limited Time-to-live in
+    /// the ReorgPool and will be discarded once the Time-to-live threshold has been reached.
+    pub fn insert(&self, transaction: Arc<Transaction>) -> Result<(), ReorgPoolError> {
+        self.pool_storage
+            .write()
+            .map_err(|e| ReorgPoolError::BackendError(e.to_string()))?
+            .insert(transaction);
+        Ok(())
     }
 
     /// Check if a transaction is stored in the ReorgPool
@@ -81,22 +96,23 @@ impl ReorgPool {
         Ok(self
             .pool_storage
             .read()
-            .map_err(|_| ReorgPoolError::PoisonedAccess)?
+            .map_err(|e| ReorgPoolError::BackendError(e.to_string()))?
             .has_tx_with_excess_sig(excess_sig))
     }
 
     /// Remove the transactions from the ReorgPool that were used in provided removed blocks. The transactions can be
     /// resubmitted to the Unconfirmed Pool.
-    pub fn scan_for_and_remove_reorged_txs(
+    pub fn remove_reorged_txs_and_discard_double_spends(
         &self,
         removed_blocks: Vec<Block>,
+        new_blocks: &Vec<Block>,
     ) -> Result<Vec<Arc<Transaction>>, ReorgPoolError>
     {
         Ok(self
             .pool_storage
             .write()
-            .map_err(|_| ReorgPoolError::PoisonedAccess)?
-            .scan_for_and_remove_reorged_txs(removed_blocks))
+            .map_err(|e| ReorgPoolError::BackendError(e.to_string()))?
+            .remove_reorged_txs_and_discard_double_spends(removed_blocks, new_blocks))
     }
 
     /// Returns the total number of published transactions stored in the ReorgPool
@@ -104,8 +120,17 @@ impl ReorgPool {
         Ok(self
             .pool_storage
             .write()
-            .map_err(|_| ReorgPoolError::PoisonedAccess)?
+            .map_err(|e| ReorgPoolError::BackendError(e.to_string()))?
             .len())
+    }
+
+    /// Returns all transaction stored in the ReorgPool.
+    pub fn snapshot(&self) -> Result<Vec<Arc<Transaction>>, ReorgPoolError> {
+        Ok(self
+            .pool_storage
+            .write()
+            .map_err(|e| ReorgPoolError::BackendError(e.to_string()))?
+            .snapshot())
     }
 
     /// Returns the total weight of all transactions stored in the pool.
@@ -113,26 +138,33 @@ impl ReorgPool {
         Ok(self
             .pool_storage
             .write()
-            .map_err(|_| ReorgPoolError::PoisonedAccess)?
+            .map_err(|e| ReorgPoolError::BackendError(e.to_string()))?
             .calculate_weight())
+    }
+}
+
+impl Clone for ReorgPool {
+    fn clone(&self) -> Self {
+        ReorgPool {
+            pool_storage: self.pool_storage.clone(),
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{test_utils::builders::create_test_block, tx};
+    use crate::{consensus::Network, helpers::create_orphan_block, transactions::tari_amount::MicroTari, tx};
     use std::{thread, time::Duration};
-    use tari_transactions::tari_amount::MicroTari;
 
     #[test]
     fn test_insert_rlu_and_ttl() {
-        let tx1 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(500), lock: 4000, inputs: 2, outputs: 1).0);
-        let tx2 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(300), lock: 3000, inputs: 2, outputs: 1).0);
-        let tx3 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(100), lock: 2500, inputs: 2, outputs: 1).0);
-        let tx4 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(200), lock: 1000, inputs: 2, outputs: 1).0);
-        let tx5 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(500), lock: 2000, inputs: 2, outputs: 1).0);
-        let tx6 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(600), lock: 5500, inputs: 2, outputs: 1).0);
+        let tx1 = Arc::new(tx!(MicroTari(100_000), fee: MicroTari(500), lock: 4000, inputs: 2, outputs: 1).0);
+        let tx2 = Arc::new(tx!(MicroTari(100_000), fee: MicroTari(300), lock: 3000, inputs: 2, outputs: 1).0);
+        let tx3 = Arc::new(tx!(MicroTari(100_000), fee: MicroTari(100), lock: 2500, inputs: 2, outputs: 1).0);
+        let tx4 = Arc::new(tx!(MicroTari(100_000), fee: MicroTari(200), lock: 1000, inputs: 2, outputs: 1).0);
+        let tx5 = Arc::new(tx!(MicroTari(100_000), fee: MicroTari(500), lock: 2000, inputs: 2, outputs: 1).0);
+        let tx6 = Arc::new(tx!(MicroTari(100_000), fee: MicroTari(600), lock: 5500, inputs: 2, outputs: 1).0);
 
         let reorg_pool = ReorgPool::new(ReorgPoolConfig {
             storage_capacity: 3,
@@ -211,6 +243,8 @@ mod test {
 
     #[test]
     fn remove_scan_for_and_remove_reorged_txs() {
+        let network = Network::LocalNet;
+        let consensus_constants = network.create_consensus_constants();
         let tx1 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(50), lock: 4000, inputs: 2, outputs: 1).0);
         let tx2 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(30), lock: 3000, inputs: 2, outputs: 1).0);
         let tx3 = Arc::new(tx!(MicroTari(10_000), fee: MicroTari(20), lock: 2500, inputs: 2, outputs: 1).0);
@@ -272,11 +306,13 @@ mod test {
         );
 
         let reorg_blocks = vec![
-            create_test_block(3000, None, vec![(*tx3).clone(), (*tx4).clone()]),
-            create_test_block(4000, None, vec![(*tx1).clone(), (*tx2).clone()]),
+            create_orphan_block(3000, vec![(*tx3).clone(), (*tx4).clone()], &consensus_constants),
+            create_orphan_block(4000, vec![(*tx1).clone(), (*tx2).clone()], &consensus_constants),
         ];
 
-        let removed_txs = reorg_pool.scan_for_and_remove_reorged_txs(reorg_blocks).unwrap();
+        let removed_txs = reorg_pool
+            .remove_reorged_txs_and_discard_double_spends(reorg_blocks, &vec![])
+            .unwrap();
         assert_eq!(removed_txs.len(), 3);
         assert!(removed_txs.contains(&tx2));
         assert!(removed_txs.contains(&tx3));

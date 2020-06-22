@@ -23,30 +23,31 @@
 macro_rules! unwrap_oms_send_msg {
     ($var:expr, reply_value=$reply_value:expr) => {
         match $var {
-            crate::outbound::DhtOutboundRequest::SendMsg(boxed, reply_tx) => {
+            crate::outbound::DhtOutboundRequest::SendMessage(boxed, body, reply_tx) => {
                 let _ = reply_tx.send($reply_value);
-                *boxed
+                (*boxed, body)
             },
-            _ => panic!("Unexpected DhtOutboundRequest"),
         }
     };
     ($var:expr) => {
-        unwrap_oms_send_msg!($var, reply_value = 0);
-    };
-}
-
-macro_rules! acquire_read_lock {
-    ($e:expr) => {
-        acquire_lock!($e, read)
+        unwrap_oms_send_msg!(
+            $var,
+            reply_value = $crate::outbound::SendMessageResponse::Queued(vec![].into())
+        );
     };
 }
 
 mod dht_actor_mock;
-mod dht_discovery_mock;
-mod makers;
-mod service;
-
 pub use dht_actor_mock::{create_dht_actor_mock, DhtMockState};
+
+mod dht_discovery_mock;
 pub use dht_discovery_mock::{create_dht_discovery_mock, DhtDiscoveryMockState};
+
+mod makers;
 pub use makers::*;
+
+mod service;
 pub use service::{service_fn, service_spy};
+
+mod store_and_forward_mock;
+pub use store_and_forward_mock::{create_store_and_forward_mock, StoreAndForwardMockState};

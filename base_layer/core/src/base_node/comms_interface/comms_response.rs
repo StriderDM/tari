@@ -21,11 +21,15 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
-    blocks::{blockheader::BlockHeader, Block},
-    chain_storage::{ChainMetadata, HistoricalBlock, MutableMmrState},
+    blocks::{blockheader::BlockHeader, Block, NewBlockTemplate},
+    chain_storage::{ChainMetadata, HistoricalBlock},
+    proof_of_work::Difficulty,
+    transactions::{
+        transaction::{TransactionKernel, TransactionOutput},
+        types::HashOutput,
+    },
 };
 use serde::{Deserialize, Serialize};
-use tari_transactions::transaction::{TransactionKernel, TransactionOutput};
 
 /// API Response enum
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -35,6 +39,10 @@ pub enum NodeCommsResponse {
     BlockHeaders(Vec<BlockHeader>),
     TransactionOutputs(Vec<TransactionOutput>),
     HistoricalBlocks(Vec<HistoricalBlock>),
-    MmrState(MutableMmrState),
+    NewBlockTemplate(NewBlockTemplate),
     NewBlock(Block),
+    TargetDifficulty(Difficulty),
+    FetchHeadersAfterResponse(Vec<BlockHeader>),
+    MmrNodeCount(u32),
+    MmrNodes(Vec<HashOutput>, Vec<u8>),
 }
