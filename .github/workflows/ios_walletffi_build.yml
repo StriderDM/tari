@@ -1,0 +1,45 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Build iOS Libwallet
+
+on:
+  push:
+    branches: [ development ]
+  pull_request:
+    branches: [ development ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+    - name: Homebrew Bottles
+      run: |
+        ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+        brew install pkgconfig git make cmake autoconf automake libtool
+    - name: XCode Toolchain
+      uses: maxim-lobanov/setup-xcode@1.0
+      with:
+        xcode-version: latest
+    - name: Rust Toolchain
+      uses: actions-rs/toolchain@v1.0.6
+      with:
+       toolchain: nightly-2020-06-10
+       default: true
+       components: rustfmt, clippy
+    - name: iOS Mobile Targets # Putting this in Rust Toolchain step doesn't work, so 2 step process.
+      run: |
+         rustup target add aarch64-apple-ios x86_64-apple-ios
+    - name: Cargo Lipo Tool
+      uses: actions-rs/install@v0.1
+      with:
+        crate: cargo-lipo
+        version: latest
+        use-tool-cache: true
+    - name: Checkout
+      uses: actions/checkout@v2
+    - name: iOS Library Build
+      run: |
+         export PKG_CONFIG_ALLOW_CROSS=1
+         unset CPATH
+         cd ./base_layer/wallet_ffi
+         cargo-lipo lipo --release
