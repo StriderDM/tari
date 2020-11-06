@@ -232,10 +232,7 @@ impl InnerService {
                         status,
                         details: "failed to submit block".to_string(),
                     })?;
-                debug!(
-                    target: LOG_TARGET,
-                    "Submitted block #{} to Tari node", height
-                );
+                debug!(target: LOG_TARGET, "Submitted block #{} to Tari node", height);
                 self.block_templates.remove(&hash).await;
             } else {
                 info!(
@@ -343,10 +340,9 @@ impl InnerService {
             block
                 .block
                 .clone()
-                .ok_or(MmProxyError::MissingDataError("Tari block".to_string()))?
-                .clone(),
+                .ok_or_else(|| MmProxyError::MissingDataError("Tari block".to_string()))?,
         )
-        .map_err(|e| MmProxyError::MissingDataError(e.to_string()))?;
+        .map_err(MmProxyError::MissingDataError)?;
         debug!(target: LOG_TARGET, "New block received from Tari: {}", (tari_block));
         debug!(target: LOG_TARGET, "with miner data: {:?}", block.miner_data);
         let mining_data = block
@@ -477,7 +473,11 @@ impl InnerService {
         let json_response = convert_reqwest_response_to_hyper_json_response(resp).await?;
 
         if submit_block {
-            debug!(target: LOG_TARGET, "Block submitted to monerod, response is: {}", json_response.body());
+            debug!(
+                target: LOG_TARGET,
+                "Block submitted to monerod, response is: {}",
+                json_response.body()
+            );
         } else {
             debug!(target: LOG_TARGET, "Received response {}", json_response.body());
         }
