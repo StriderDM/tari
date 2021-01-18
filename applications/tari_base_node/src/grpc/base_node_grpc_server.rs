@@ -42,6 +42,7 @@ use tari_app_grpc::{
 };
 use tari_core::{
     base_node::StateMachineHandle,
+    chain_storage::{BlockchainDatabase, LMDBDatabase},
     mempool::{service::LocalMempoolService, TxStorageResponse},
     transactions::transaction::Transaction,
 };
@@ -75,6 +76,7 @@ pub struct BaseNodeGrpcServer {
     node_config: GlobalConfig,
     state_machine_handle: StateMachineHandle,
     peer_manager: Arc<PeerManager>,
+    blockchain_db: BlockchainDatabase<LMDBDatabase>,
 }
 
 impl BaseNodeGrpcServer {
@@ -85,6 +87,7 @@ impl BaseNodeGrpcServer {
         node_config: GlobalConfig,
         state_machine_handle: StateMachineHandle,
         peer_manager: Arc<PeerManager>,
+        blockchain_db: BlockchainDatabase<LMDBDatabase>,
     ) -> Self
     {
         Self {
@@ -94,6 +97,7 @@ impl BaseNodeGrpcServer {
             node_config,
             state_machine_handle,
             peer_manager,
+            blockchain_db,
         }
     }
 }
@@ -135,7 +139,7 @@ impl tari_rpc::base_node_server::BaseNode for BaseNodeGrpcServer {
             .drain(..cmp::min(heights.len(), GET_DIFFICULTY_MAX_HEIGHTS))
             .collect();
         let (mut tx, rx) = mpsc::channel(GET_DIFFICULTY_MAX_HEIGHTS);
-
+        let blockchain_db = self.blockchain_db.clone();
         self.executor.spawn(async move {
             let mut page: Vec<u64> = heights
                 .drain(..cmp::min(heights.len(), GET_DIFFICULTY_PAGE_SIZE))
@@ -154,27 +158,33 @@ impl tari_rpc::base_node_server::BaseNode for BaseNodeGrpcServer {
                         let mut iter = data.iter().peekable();
                         let mut result = Vec::new();
                         while let Some(next) = iter.next() {
-                            let current_difficulty = next.pow.target_difficulty.as_u64();
-                            let current_timestamp = next.timestamp.as_u64();
-                            let current_height = next.height;
-                            let estimated_hash_rate = if let Some(peek) = iter.peek() {
-                                let peeked_timestamp = peek.timestamp.as_u64();
-                                // Sometimes blocks can have the same timestamp, lucky miner and some clock drift.
-                                if peeked_timestamp > current_timestamp {
-                                    current_difficulty / (peeked_timestamp - current_timestamp)
-                                } else {
-                                    0
-                                }
-                            } else {
-                                0
-                            };
+                            match blockchain_db.fetch_target_difficulty(next.pow_algo(), next.height) {
+                                Err(_) => {},
+                                Ok(target_difficulties) => {
+                                    let current_difficulty = target_difficulties.calculate().as_u64();
+                                    let current_timestamp = next.timestamp.as_u64();
+                                    let current_height = next.height;
+                                    let estimated_hash_rate = if let Some(peek) = iter.peek() {
+                                        let peeked_timestamp = peek.timestamp.as_u64();
+                                        // Sometimes blocks can have the same timestamp, lucky miner and some clock
+                                        // drift.
+                                        if peeked_timestamp > current_timestamp {
+                                            current_difficulty / (peeked_timestamp - current_timestamp)
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        0
+                                    };
 
-                            result.push((
-                                current_height,
-                                current_difficulty,
-                                estimated_hash_rate,
-                                current_timestamp,
-                            ))
+                                    result.push((
+                                        current_height,
+                                        current_difficulty,
+                                        estimated_hash_rate,
+                                        current_timestamp,
+                                    ))
+                                },
+                            }
                         }
 
                         result

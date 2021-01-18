@@ -634,7 +634,6 @@ fn local_get_new_block_template_and_get_new_block() {
         assert_eq!(block_template.body.kernels().len(), 2);
 
         let mut block = node.local_nci.get_new_block(block_template.clone()).await.unwrap();
-        block.header.pow.accumulated_blake_difficulty = Difficulty::from(100);
         assert_eq!(block.header.height, 1);
         assert_eq!(block.body, block_template.body);
 

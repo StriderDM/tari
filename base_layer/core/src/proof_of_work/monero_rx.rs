@@ -460,9 +460,6 @@ mod test {
         };
         let serialized = bincode::serialize(&monero_data).unwrap();
         let pow = ProofOfWork {
-            accumulated_monero_difficulty: Default::default(),
-            accumulated_blake_difficulty: Default::default(),
-            target_difficulty: Default::default(),
             pow_algo: PowAlgorithm::Monero,
             pow_data: serialized,
         };
@@ -562,9 +559,6 @@ mod test {
         };
         let serialized = bincode::serialize(&monero_data).unwrap();
         let pow = ProofOfWork {
-            accumulated_monero_difficulty: Default::default(),
-            accumulated_blake_difficulty: Default::default(),
-            target_difficulty: Default::default(),
             pow_algo: PowAlgorithm::Monero,
             pow_data: serialized,
         };
@@ -611,9 +605,6 @@ mod test {
         };
         let serialized = bincode::serialize(&monero_data).unwrap();
         let pow = ProofOfWork {
-            accumulated_monero_difficulty: Default::default(),
-            accumulated_blake_difficulty: Default::default(),
-            target_difficulty: Default::default(),
             pow_algo: PowAlgorithm::Monero,
             pow_data: serialized,
         };
@@ -664,9 +655,6 @@ mod test {
         };
         let serialized = bincode::serialize(&monero_data).unwrap();
         let pow = ProofOfWork {
-            accumulated_monero_difficulty: Default::default(),
-            accumulated_blake_difficulty: Default::default(),
-            target_difficulty: Default::default(),
             pow_algo: PowAlgorithm::Monero,
             pow_data: serialized,
         };
@@ -717,9 +705,6 @@ mod test {
         };
         let serialized = bincode::serialize(&monero_data).unwrap();
         let pow = ProofOfWork {
-            accumulated_monero_difficulty: Default::default(),
-            accumulated_blake_difficulty: Default::default(),
-            target_difficulty: Default::default(),
             pow_algo: PowAlgorithm::Monero,
             pow_data: serialized,
         };
@@ -747,9 +732,6 @@ mod test {
         let monero_data = MoneroData::default();
         let serialized = bincode::serialize(&monero_data).unwrap();
         let pow = ProofOfWork {
-            accumulated_monero_difficulty: Default::default(),
-            accumulated_blake_difficulty: Default::default(),
-            target_difficulty: Default::default(),
             pow_algo: PowAlgorithm::Monero,
             pow_data: serialized,
         };
@@ -799,9 +781,6 @@ mod test {
         };
         let serialized = bincode::serialize(&monero_data).unwrap();
         let pow = ProofOfWork {
-            accumulated_monero_difficulty: Default::default(),
-            accumulated_blake_difficulty: Default::default(),
-            target_difficulty: Default::default(),
             pow_algo: PowAlgorithm::Monero,
             pow_data: serialized,
         };

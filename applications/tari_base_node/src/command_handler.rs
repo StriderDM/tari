@@ -62,6 +62,7 @@ use tari_core::{
     chain_storage::{async_db::AsyncBlockchainDb, LMDBDatabase},
     mempool::service::LocalMempoolService,
     mining::MinerInstruction,
+    proof_of_work::{Difficulty, TargetDifficultyWindow},
     tari_utilities::{hex::Hex, message_format::MessageFormat, Hashable},
     transactions::{
         tari_amount::{uT, MicroTari},
@@ -1179,6 +1180,7 @@ impl CommandHandler {
 
     pub fn period_stats(&self, period_end: u64, mut period_ticker_end: u64, period: u64) {
         let mut node = self.node_service.clone();
+        let blockchain_db = self.blockchain_db.clone();
         self.executor.spawn(async move {
             let meta = node.get_metadata().await.expect("Could not retrieve chain meta");
 
@@ -1255,14 +1257,26 @@ impl CommandHandler {
                 } else {
                     (block.header.timestamp.as_u64() - prev_block.header.timestamp.as_u64()) as f64
                 };
-                let diff = block.header.pow.target_difficulty.as_u64();
-                period_difficulty += diff;
-                period_solvetime += st as u64;
-                period_hash += diff as f64 / st / 1_000_000.0;
-                if period_ticker_end <= period_end {
-                    break;
-                }
-                print!("\x1B[{}D\x1B[K", (height + 1).to_string().chars().count());
+                match blockchain_db
+                    .fetch_target_difficulty(block.header.pow_algo(), block.header.height)
+                    .await
+                {
+                    Err(e) => {
+                        println!("Something went wrong");
+                        warn!(target: LOG_TARGET, "Error fetching target difficulty {:?}", e);
+                        return;
+                    },
+                    Ok(target_difficulties) => {
+                        let diff = target_difficulties.calculate().as_u64();
+                        period_difficulty += diff;
+                        period_solvetime += st as u64;
+                        period_hash += diff as f64 / st / 1_000_000.0;
+                        if period_ticker_end <= period_end {
+                            return;
+                        }
+                        print!("\x1B[{}D\x1B[K", (height + 1).to_string().chars().count());
+                    },
+                };
             }
             println!("Complete");
             println!("Results of tx count, hash rate estimation, target difficulty, solvetime, block count");

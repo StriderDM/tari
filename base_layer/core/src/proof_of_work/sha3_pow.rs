@@ -91,6 +91,7 @@ pub mod test {
         header
     }
 
+    // Broken
     #[test]
     fn validate_max_target() {
         let mut header = get_header();
@@ -98,6 +99,7 @@ pub mod test {
         assert_eq!(sha3_difficulty(&header), Difficulty::from(10));
     }
 
+    // Broken
     #[test]
     fn difficulty_1000() {
         let mut header = get_header();
@@ -110,6 +112,7 @@ pub mod test {
         );
     }
 
+    // Broken
     #[test]
     fn difficulty_1mil() {
         let mut header = get_header();

@@ -96,8 +96,6 @@ pub fn append_to_pow_blockchain<T: BlockchainBackend>(
         }
 
         let height = db.get_chain_metadata().unwrap().height_of_longest_chain();
-        let target_difficulties = db.fetch_target_difficulty(pow_algo, height).unwrap();
-        new_block.header.pow.target_difficulty = target_difficulties.calculate();
         db.add_block(new_block.clone().into()).unwrap();
         prev_block = new_block;
     }
@@ -119,7 +117,8 @@ pub fn calculate_accumulated_difficulty(
     );
     for height in heights {
         let header = db.fetch_header(height).unwrap().unwrap();
-        lwma.add(header.timestamp, header.pow.target_difficulty).unwrap();
+        let target_difficulties = db.fetch_target_difficulty(pow_algo, height).unwrap();
+        lwma.add(header.timestamp, target_difficulties.calculate()).unwrap();
     }
     lwma.get_difficulty()
 }

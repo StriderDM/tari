@@ -206,6 +206,7 @@ fn main_inner() -> Result<(), ExitCodes> {
             node_config.clone(),
             ctx.state_machine(),
             ctx.base_node_comms().peer_manager(),
+            ctx.blockchain_db(),
         );
 
         rt.spawn(run_grpc(grpc, node_config.grpc_base_node_address, shutdown.to_signal()));

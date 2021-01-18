@@ -1,18 +1,13 @@
 /// Metadata required for validating the Proof of Work calculation
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProofOfWork {
+    /// Tag 2, 3 and 6 were deprecated and removed
     /// 0 = Monero
     /// 1 = Blake
     #[prost(uint64, tag = "1")]
     pub pow_algo: u64,
-    #[prost(uint64, tag = "2")]
-    pub accumulated_monero_difficulty: u64,
-    #[prost(uint64, tag = "3")]
-    pub accumulated_blake_difficulty: u64,
     #[prost(bytes, tag = "4")]
     pub pow_data: std::vec::Vec<u8>,
-    #[prost(uint64, tag = "5")]
-    pub target_difficulty: u64,
 }
 /// The BlockHeader contains all the metadata for the block, including proof of work, a link to the previous block
 /// and the transaction kernels.
