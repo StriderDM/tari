@@ -21,11 +21,13 @@
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::error::MmProxyError;
+use json::Value;
 use monero::{
     blockdata::{transaction::SubField, Block},
     consensus::{deserialize, serialize},
     cryptonote::hash::Hash,
 };
+use serde_json as json;
 use std::convert::TryFrom;
 use tari_app_grpc::tari_rpc as grpc;
 use tari_core::{
@@ -92,4 +94,34 @@ pub fn extract_tari_hash(monero: &Block) -> Option<&Hash> {
         }
     }
     None
+}
+
+pub fn default_accept(json: Value) -> Value {
+    let req_id = json["id"].as_i64().unwrap_or_else(|| -1);
+    return json::json!({
+       "id": req_id,
+       "jsonrpc": "2.0",
+       "result": "{}",
+       "status": "OK",
+       // Can optionally be displayed in consumer, doesn't impact current monero rpc at present,
+       // generic enough for any cryptocurrency to use the field.
+       "merge-mining": "Tari",
+       "untrusted": false
+    });
+}
+
+pub fn default_reject(json: Value) -> Value {
+    let req_id = json["id"].as_i64().unwrap_or_else(|| -1);
+
+    return json::json!({
+      "id": req_id,
+      "jsonrpc": "2.0",
+      "error": {
+        "code": -7,
+        "message": "Block not accepted"
+      },
+      // Can optionally be displayed in consumer, doesn't impact current monero rpc at present,
+      // generic enough for any cryptocurrency to use the field.
+      "merge-mining": "Tari",
+    });
 }

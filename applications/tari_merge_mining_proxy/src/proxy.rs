@@ -24,6 +24,7 @@ use crate::{
     block_template_data::{BlockTemplateDataBuilder, BlockTemplateRepository},
     error::MmProxyError,
     helpers,
+    helpers::{default_accept, default_reject},
 };
 use bytes::BytesMut;
 use futures::{StreamExt, TryFutureExt};
@@ -62,7 +63,6 @@ use tari_core::{
     blocks::{Block, NewBlockTemplate},
     proof_of_work::monero_rx,
 };
-use tokio::runtime::Handle;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 pub const LOG_TARGET: &str = "tari_mm_proxy::proxy";
@@ -321,7 +321,8 @@ impl InnerService {
             },
         };
 
-        let handle = Handle::current();
+        let (parts, mut json) = monerod_resp.into_parts();
+
         for param in params.iter().map(|p| p.as_str()).filter_map(|p| p) {
             let monero_block = helpers::deserialize_monero_block_from_hex(param)?;
             debug!(target: LOG_TARGET, "Monero block: {}", monero_block);
@@ -348,7 +349,6 @@ impl InnerService {
                 let mut base_node_client = self.connect_grpc_client().await?;
                 let mut block_templates_clone = self.block_templates.clone();
                 let block_data_clone = block_data.clone();
-                handle.spawn(async move {
                     let start = std::time::Instant::now();
                     match base_node_client
                         .submit_block(block_data_clone.tari_block)
@@ -365,17 +365,28 @@ impl InnerService {
                                 start.elapsed()
                             );
                             block_templates_clone.remove(&hash).await;
+                            // Tari Accepted
+                            json = default_accept(json);
                         },
-                        _ => debug!(
-                            target: LOG_TARGET,
-                            "Problem submitting block #{} to Tari node, responded in  {:.0?} (SubmitBlock)",
-                            height,
-                            start.elapsed()
-                        ),
+                        _ => {
+                            debug!(
+                                target: LOG_TARGET,
+                                "Problem submitting block #{} to Tari node, responded in  {:.0?} (SubmitBlock)",
+                                height,
+                                start.elapsed()
+                            );
+                            if json["error"].is_null() {
+                                // Only Monero accepted, Tari difficulty is likely higher than
+                                // Monero. Must accept here.
+                                json = default_accept(json);
+                            } else {
+                                // Both rejected
+                                json = default_reject(json);
+                            }
+                        },
                     }
 
                     block_templates_clone.remove_outdated().await;
-                });
             } else {
                 info!(
                     target: LOG_TARGET,
@@ -383,8 +394,6 @@ impl InnerService {
                 );
             }
         }
-        // Return the Monero response as is
-        let (parts, json) = monerod_resp.into_parts();
         Ok(into_body(parts, json))
     }
 
@@ -635,14 +644,7 @@ impl InnerService {
         let json_response;
         if submit_block && !self.config.proxy_submit_to_origin {
             // Assume it would be accepted
-            let req_id = json["id"].as_i64().unwrap_or_else(|| -1);
-            let accept_response = json::json!({
-               "id": req_id,
-               "jsonrpc": "2.0",
-               "result": "{}",
-               "status": "OK",
-               "untrusted": false
-            });
+            let accept_response = default_accept(json);
             json_response =
                 convert_json_to_hyper_json_response(accept_response, StatusCode::OK, monerod_uri.clone()).await?;
         } else {
